@@ -1,17 +1,16 @@
 """
-IGNIS - Sistem Pelaporan & Pendukung Keputusan Mitigasi Kebakaran Gunung Klabat, Minahasa Utara.
-Dilengkapi:
-1. Autentikasi Login Peran (Masyarakat/Pendaki vs Regu Pemadam/BPBD)
-2. UI Modern & Eye-Catching dengan kontras tinggi pada chatbot
-3. Otomasi Penentuan Prioritas AI Menggunakan Gemini 3.8 Flash (Masyarakat tidak perlu memilih keparahan)
+IGNIS KLABAT - Sistem Pelaporan & Pendukung Keputusan Mitigasi Kebakaran Hutan Gunung Klabat.
+Wilayah Kerja: Kawasan Gunung Klabat (1.995 mdpl), Minahasa Utara, Sulawesi Utara.
+Tampilan: Clean White / Light Mode — Elegan, Modern, dan Nyaman di Mata.
 """
 
-import streamlit as st
 import os
 import sys
-import pandas as pd
 from datetime import datetime
 from PIL import Image
+import pandas as pd
+import streamlit as st
+from streamlit_folium import st_folium
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -29,355 +28,22 @@ from data.generate_klabat_data import seed_klabat_database
 from modules.emergency_chatbot import get_anti_panic_response, KONTAK_DARURAT_KLABAT
 from modules.ai_priority_classifier import classify_fire_priority_ai
 from modules.klabat_map import render_klabat_folium_map
-from streamlit_folium import st_folium
-import re
-import textwrap
-from typing import Any, Dict, List
+from modules.fishbone_klabat import render_tab_fishbone
 
-import pandas as pd
-import plotly.graph_objects as go
-
-STATUS_DATA = "Didukung data"
-STATUS_DUGAAN = "Dugaan"
-
-# Ambang untuk analisis seluruh laporan (agregat)
-MIN_KASUS_AGREGAT = 2        # minimal jumlah laporan yang cocok
-MIN_PERSEN_AGREGAT = 10.0    # minimal persentase laporan yang cocok
-MIN_SELESAI_DURASI = 3       # minimal laporan selesai agar median durasi dianggap bermakna
-
-EFEK = "Kebakaran Hutan & Lahan<br>Gunung Klabat"
-
-# ----------------------------------------------------------------------------
-# DEFINISI FAKTOR (edit di sini jika ingin menambah / mengganti faktor)
-# tipe: "kata_kunci" | "vegetasi" | "area" | "jarak" | "durasi" | "antrean" | "dugaan"
-# ----------------------------------------------------------------------------
-FAKTOR = [
-    # ---------------- MANUSIA ----------------
-    {"kategori": "Manusia", "singkat": "Puntung rokok / api unggun",
-     "faktor": "Puntung rokok, api unggun, atau sisa perapian pendaki",
-     "tipe": "kata_kunci",
-     "kata": ["rokok", "puntung", "api unggun", "perapian", "bara"],
-     "keterangan": "Aktivitas pendaki atau pengunjung yang meninggalkan sumber api."},
-    {"kategori": "Manusia", "singkat": "Pembakaran sampah/serasah",
-     "faktor": "Pembakaran sampah atau serasah kebun oleh warga",
-     "tipe": "kata_kunci",
-     "kata": ["bakar sampah", "membakar sampah", "pembakaran serasah", "membakar serasah",
-              "pembakaran ranting", "membakar ranting", "sisa pembakaran", "bakar ranting"],
-     "keterangan": "Pembakaran terbuka di batas kebun yang merambat ke semak sekitarnya."},
-    {"kategori": "Manusia", "singkat": "Pengawasan pendaki lemah",
-     "faktor": "Pengawasan dan edukasi pendaki di pos registrasi terbatas",
-     "tipe": "dugaan",
-     "keterangan": "Belum ada data pengawasan di sistem. Perlu wawancara dengan pengelola pos."},
-
-    # ---------------- LINGKUNGAN ----------------
-    {"kategori": "Lingkungan", "singkat": "Semak/alang-alang kering",
-     "faktor": "Vegetasi mudah terbakar (semak, alang-alang, ilalang kering)",
-     "tipe": "vegetasi", "kata": ["semak", "alang", "ilalang"],
-     "keterangan": "Bahan bakar halus yang cepat kering dan cepat merambat."},
-    {"kategori": "Lingkungan", "singkat": "Kebun cengkeh/pala/kelapa",
-     "faktor": "Kebun produktif (cengkeh, pala, kelapa) di batas hutan",
-     "tipe": "vegetasi", "kata": ["cengkeh", "pala", "kelapa", "kebun"],
-     "keterangan": "Serasah kebun menjadi bahan bakar dan api mengancam aset warga."},
-    {"kategori": "Lingkungan", "singkat": "Lereng curam & jurang",
-     "faktor": "Medan lereng curam, berbatu, dan jurang",
-     "tipe": "kata_kunci", "kata": ["jurang", "terjal", "curam", "berbatu", "licin"],
-     "keterangan": "Medan sulit memperlambat pergerakan regu darat."},
-
-    # ---------------- CUACA ----------------
-    {"kategori": "Cuaca", "singkat": "Angin kencang",
-     "faktor": "Angin kencang yang memperluas dan melompatkan api",
-     "tipe": "kata_kunci", "kata": ["angin kencang", "angin cukup kencang", "tersapu angin",
-                                    "angin bertiup", "angin puncak"],
-     "keterangan": "Angin lereng mempercepat rambatan api ke atas dan ke arah pemukiman."},
-    {"kategori": "Cuaca", "singkat": "Kemarau / hari tanpa hujan",
-     "faktor": "Musim kemarau dan hari tanpa hujan berturut-turut",
-     "tipe": "dugaan",
-     "keterangan": "Tidak ada data cuaca di sistem. Perlu data curah hujan BMKG."},
-    {"kategori": "Cuaca", "singkat": "Suhu & kelembaban rendah",
-     "faktor": "Suhu tinggi dan kelembaban udara rendah",
-     "tipe": "dugaan",
-     "keterangan": "Tidak ada data suhu/kelembaban di sistem. Perlu data BMKG."},
-
-    # ---------------- INFRASTRUKTUR ----------------
-    {"kategori": "Infrastruktur", "singkat": "Kejadian di jalur pendakian",
-     "faktor": "Titik api di jalur pendakian (akses evakuasi terbatas)",
-     "tipe": "area", "kata": ["jalur", "pos "],
-     "keterangan": "Jalur setapak sempit menyulitkan evakuasi pendaki dan akses regu."},
-    {"kategori": "Infrastruktur", "singkat": "Dekat pemukiman (<= 1 km)",
-     "faktor": "Titik api sangat dekat pemukiman (<= 1 km)",
-     "tipe": "jarak", "batas_km": 1.0,
-     "keterangan": "Zona penyangga antara hutan dan rumah warga sempit."},
-    {"kategori": "Infrastruktur", "singkat": "Sumber air pemadam terbatas",
-     "faktor": "Sumber air pemadam di lereng terbatas",
-     "tipe": "dugaan",
-     "keterangan": "Belum ada data titik air di sistem. Perlu survei lapangan."},
-
-    # ---------------- PENANGANAN ----------------
-    {"kategori": "Penanganan", "singkat": "Durasi laporan sampai padam",
-     "faktor": "Durasi penanganan dari laporan masuk sampai api padam",
-     "tipe": "durasi",
-     "keterangan": "Diukur dari selisih tanggal_lapor dan waktu_selesai."},
-    {"kategori": "Penanganan", "singkat": "Antrean menunggu penanganan",
-     "faktor": "Laporan menumpuk dan masih menunggu penanganan",
-     "tipe": "antrean", "batas_persen": 30.0,
-     "keterangan": "Persentase laporan berstatus 'Menunggu Penanganan'."},
-    {"kategori": "Penanganan", "singkat": "Personel & peralatan terbatas",
-     "faktor": "Keterbatasan personel dan peralatan pemadam di lereng",
-     "tipe": "dugaan",
-     "keterangan": "Belum ada data sumber daya di sistem. Perlu data inventaris Damkar/BPBD."},
-]
-
-URUTAN_ATAS = ["Manusia", "Lingkungan", "Cuaca"]
-URUTAN_BAWAH = ["Infrastruktur", "Penanganan"]
-
-
-# ----------------------------------------------------------------------------
-# EVALUASI FAKTOR TERHADAP DATA
-# ----------------------------------------------------------------------------
-def _teks(df: pd.DataFrame, kolom: str) -> pd.Series:
-    if kolom not in df.columns:
-        return pd.Series([""] * len(df), index=df.index)
-    return df[kolom].fillna("").astype(str).str.lower()
-
-
-def _cocok(df: pd.DataFrame, kolom: str, kata: List[str]) -> pd.Series:
-    # \b = batas awal kata. Mencegah "bara" cocok dengan "kobaran" atau "membara",
-    # dan "pala" cocok dengan "kepala". Awalan kata tetap cocok ("alang" -> "alang-alang").
-    pola = "|".join(r"\b" + re.escape(k) for k in kata)
-    return _teks(df, kolom).str.contains(pola, regex=True)
-
-
-def _ambang_terpenuhi(n: int, total: int) -> bool:
-    if total <= 0:
-        return False
-    if total == 1:  # mode satu laporan
-        return n >= 1
-    return n >= MIN_KASUS_AGREGAT and (100.0 * n / total) >= MIN_PERSEN_AGREGAT
-
-
-def _evaluasi(rule: Dict[str, Any], df: pd.DataFrame) -> Dict[str, Any]:
-    total = len(df)
-    tipe = rule["tipe"]
-    status, bukti = STATUS_DUGAAN, "Belum ada data pendukung di sistem."
-
-    if total == 0:
-        return {"status": status, "bukti": "Tidak ada data."}
-
-    if tipe in ("kata_kunci", "vegetasi", "area"):
-        kolom = {"kata_kunci": "deskripsi_tempat", "vegetasi": "tipe_vegetasi", "area": "lokasi_area"}[tipe]
-        n = int(_cocok(df, kolom, rule["kata"]).sum())
-        persen = 100.0 * n / total
-        bukti = f"{n} dari {total} laporan ({persen:.0f}%)"
-        if _ambang_terpenuhi(n, total):
-            status = STATUS_DATA
-        else:
-            bukti += " (di bawah ambang)"
-
-    elif tipe == "jarak":
-        jarak = pd.to_numeric(df.get("jarak_pemukiman_km"), errors="coerce")
-        n = int((jarak <= rule["batas_km"]).sum())
-        persen = 100.0 * n / total
-        bukti = f"{n} dari {total} laporan ({persen:.0f}%) berjarak <= {rule['batas_km']} km"
-        if _ambang_terpenuhi(n, total):
-            status = STATUS_DATA
-        else:
-            bukti += " (di bawah ambang)"
-
-    elif tipe == "durasi":
-        if "waktu_selesai" in df.columns and "tanggal_lapor" in df.columns:
-            mulai = pd.to_datetime(df["tanggal_lapor"], errors="coerce")
-            selesai = pd.to_datetime(df["waktu_selesai"], errors="coerce")
-            jam = ((selesai - mulai).dt.total_seconds() / 3600.0).dropna()
-            jam = jam[jam >= 0]
-            batas = 1 if total == 1 else MIN_SELESAI_DURASI
-            if len(jam) >= batas:
-                status = STATUS_DATA
-                bukti = f"Median {jam.median():.1f} jam (n={len(jam)} laporan selesai)"
-            else:
-                bukti = f"Baru {len(jam)} laporan selesai (butuh minimal {batas})"
-
-    elif tipe == "antrean":
-        n = int((df.get("status_penanganan") == "Menunggu Penanganan").sum())
-        persen = 100.0 * n / total
-        bukti = f"{n} dari {total} laporan ({persen:.0f}%) menunggu penanganan"
-        if persen >= rule["batas_persen"]:
-            status = STATUS_DATA
-        else:
-            bukti += f" (di bawah ambang {rule['batas_persen']:.0f}%)"
-
-    # tipe "dugaan": tidak dievaluasi, selalu Dugaan
-    return {"status": status, "bukti": bukti}
-
-
-def bangun_faktor(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Mengembalikan daftar faktor lengkap dengan status dan bukti dari data."""
-    hasil = []
-    for rule in FAKTOR:
-        ev = _evaluasi(rule, df)
-        hasil.append({
-            "kategori": rule["kategori"],
-            "singkat": rule["singkat"],
-            "faktor": rule["faktor"],
-            "keterangan": rule["keterangan"],
-            "status": ev["status"],
-            "bukti": ev["bukti"],
-        })
-    return hasil
-
-
-def ringkas_faktor(faktor: List[Dict[str, Any]]) -> Dict[str, int]:
-    n_data = sum(1 for f in faktor if f["status"] == STATUS_DATA)
-    return {"total": len(faktor), "didukung_data": n_data, "dugaan": len(faktor) - n_data}
-
-
-# ----------------------------------------------------------------------------
-# VISUALISASI PLOTLY
-# ----------------------------------------------------------------------------
-def render_fishbone_plotly(faktor: List[Dict[str, Any]], judul: str = "Fishbone Diagram Kebakaran Gunung Klabat") -> go.Figure:
-    """Menggambar diagram tulang ikan. Hijau solid = didukung data; oranye titik-titik = dugaan."""
-    WARNA_DATA, WARNA_DUGAAN = "#2ECC71", "#F39C12"
-    WARNA_TULANG, WARNA_EFEK = "#48CAE4", "#E63946"
-
-    fig = go.Figure()
-
-    # Tulang belakang
-    fig.add_trace(go.Scatter(x=[0, 11], y=[0, 0], mode="lines",
-                             line=dict(color=WARNA_EFEK, width=6),
-                             hoverinfo="none", showlegend=False))
-    fig.add_annotation(x=11.15, y=0, xanchor="left", showarrow=False,
-                       text=f"<b>{EFEK}</b>", font=dict(size=12, color="#FFFFFF"),
-                       bgcolor=WARNA_EFEK, bordercolor="#FFFFFF", borderwidth=2, borderpad=6)
-
-    # Posisi cabang
-    cabang = []
-    for i, nama in enumerate(URUTAN_ATAS):
-        cabang.append({"nama": nama, "x_base": 3.6 + i * 3.4, "arah": 1})
-    for i, nama in enumerate(URUTAN_BAWAH):
-        cabang.append({"nama": nama, "x_base": 5.3 + i * 3.4, "arah": -1})
-
-    TINGGI, GESER = 3.4, 1.4   # tinggi cabang dan pergeseran ke kiri
-    legend_data, legend_dugaan = False, False
-
-    for c in cabang:
-        xb, arah = c["x_base"], c["arah"]
-        x_ujung, y_ujung = xb - GESER, arah * TINGGI
-        fig.add_trace(go.Scatter(x=[xb, x_ujung], y=[0, y_ujung], mode="lines",
-                                 line=dict(color=WARNA_TULANG, width=3),
-                                 hoverinfo="none", showlegend=False))
-        fig.add_annotation(x=x_ujung, y=y_ujung + arah * 0.4, showarrow=False,
-                           text=f"<b>{c['nama'].upper()}</b>",
-                           font=dict(size=12, color="#90E0EF"),
-                           bgcolor="#0B192C", bordercolor=WARNA_TULANG, borderwidth=1, borderpad=4)
-
-        sub = [f for f in faktor if f["kategori"] == c["nama"]]
-        for idx, f in enumerate(sub):
-            frac = (idx + 1) / (len(sub) + 1)
-            fx = xb - GESER * frac
-            fy = arah * TINGGI * frac
-            ada_data = f["status"] == STATUS_DATA
-            warna = WARNA_DATA if ada_data else WARNA_DUGAAN
-            nama_legend = "Didukung data" if ada_data else "Dugaan (perlu verifikasi)"
-            tampil_legend = (ada_data and not legend_data) or ((not ada_data) and not legend_dugaan)
-            if ada_data:
-                legend_data = True
-            else:
-                legend_dugaan = True
-
-            hover = (f"<b>[{f['kategori']}] {f['faktor']}</b><br>"
-                     f"Status: {f['status']}<br>Bukti: {f['bukti']}<br>{f['keterangan']}")
-            fig.add_trace(go.Scatter(
-                x=[fx - 0.35, fx], y=[fy, fy], mode="lines+markers",
-                line=dict(color=warna, width=2, dash="solid" if ada_data else "dot"),
-                marker=dict(size=[1, 8], color=warna),
-                hovertext=hover, hoverinfo="text",
-                name=nama_legend, legendgroup=nama_legend, showlegend=tampil_legend))
-
-            label = "<br>".join(textwrap.wrap(f["singkat"], 24))
-            fig.add_annotation(x=fx - 0.4, y=fy, xanchor="right", yanchor="middle",
-                               showarrow=False, align="right", text=label,
-                               font=dict(size=10, color="#E0E1DD"))
-
-    fig.update_layout(
-        title=dict(text=judul, font=dict(size=15, color="#FFFFFF")),
-        plot_bgcolor="#0A1128", paper_bgcolor="#070D1F",
-        xaxis=dict(visible=False, range=[-0.5, 13.8]),
-        yaxis=dict(visible=False, range=[-4.6, 4.6]),
-        margin=dict(l=10, r=10, t=50, b=10), height=640,
-        legend=dict(orientation="h", yanchor="bottom", y=-0.02, xanchor="center", x=0.5,
-                    font=dict(color="#FFFFFF", size=11)))
-    return fig
-
-
-# ----------------------------------------------------------------------------
-# TAMPILAN STREAMLIT (dipanggil dari app.py, khusus peran Regu Pemadam & BPBD)
-# ----------------------------------------------------------------------------
-def render_tab_fishbone(df_all: pd.DataFrame) -> None:
-    import streamlit as st
-
-    st.markdown("#### Analisis Akar Masalah: Fishbone Diagram")
-    st.caption(
-        "Alat analisis untuk perencanaan pencegahan dan evaluasi penanganan, bukan untuk "
-        "menentukan pengerahan regu. Status faktor dihitung otomatis dari data laporan."
-    )
-
-    if df_all is None or df_all.empty:
-        st.info("Belum ada data laporan untuk dianalisis.")
-        return
-
-    if "is_simulated" in df_all.columns and int(df_all["is_simulated"].fillna(0).min()) == 1:
-        st.warning("Seluruh data saat ini adalah simulasi. Diagram ini hanya mendemonstrasikan metode, "
-                   "bukan temuan lapangan.")
-
-    mode = st.radio("Cakupan analisis:", ["Seluruh laporan", "Satu laporan"], horizontal=True,
-                    key="fishbone_mode")
-
-    if mode == "Satu laporan":
-        opsi = {f"{r['kode_laporan']} | {r['lokasi_area']} | {r['label_prioritas']}": r["id"]
-                for _, r in df_all.iterrows()}
-        pilihan = st.selectbox("Pilih laporan:", list(opsi.keys()), key="fishbone_laporan")
-        df_pakai = df_all[df_all["id"] == opsi[pilihan]]
-        judul = f"Fishbone: {pilihan.split(' | ')[0]}"
-    else:
-        df_pakai = df_all
-        judul = f"Fishbone: seluruh laporan Gunung Klabat (n={len(df_all)})"
-
-    faktor = bangun_faktor(df_pakai)
-    ring = ringkas_faktor(faktor)
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total faktor", ring["total"])
-    c2.metric("Didukung data", ring["didukung_data"])
-    c3.metric("Masih dugaan", ring["dugaan"])
-
-    st.plotly_chart(render_fishbone_plotly(faktor, judul), use_container_width=True)
-
-    tabel = pd.DataFrame(faktor)[["kategori", "faktor", "status", "bukti"]]
-    tabel.columns = ["Kategori", "Faktor", "Status", "Bukti dari data"]
-    st.dataframe(tabel, use_container_width=True, hide_index=True)
-
-    with st.expander("Cara membaca dan batasan analisis"):
-        st.markdown(
-            f"- **Didukung data**: faktor muncul pada minimal {MIN_KASUS_AGREGAT} laporan dan "
-            f"{MIN_PERSEN_AGREGAT:.0f}% data (mode seluruh laporan), atau minimal 1 kasus (mode satu laporan).\n"
-            "- **Dugaan**: belum ada data di sistem. Faktor cuaca, sumber air, dan sumber daya "
-            "selalu berstatus dugaan sampai ada sumber datanya (misalnya BMKG).\n"
-            "- Pencocokan teks memakai kata kunci dan **belum menangani negasi**.\n"
-            "- 'Didukung data' berarti muncul di laporan masyarakat, **bukan** terbukti sebagai penyebab. "
-            "Penyebab pasti membutuhkan investigasi petugas."
-        )
-# Inisialisasi Database
+# ==============================================================================
+# INISIALISASI DATABASE & KONFIGURASI HALAMAN
+# ==============================================================================
 init_db()
 seed_klabat_database()
 
-# Konfigurasi Halaman Streamlit
 st.set_page_config(
-    page_title="IGNIS Gunung Klabat - Minahasa Utara",
+    page_title="IGNIS Klabat - Mitigasi Kebakaran Minahasa Utara",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# Folder upload gambar
+# Folder upload gambar lokal
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -387,236 +53,361 @@ if "logged_in" not in st.session_state:
     st.session_state.user_role = None
     st.session_state.username = None
 
-# ==================== STYLING UI EYE-CATCHING & KONTRAS TINGGI ====================
+# ==============================================================================
+# STYLING CSS CLEAN WHITE & LIGHT SLATE (NYAMAN DI MATA)
+# ==============================================================================
 st.markdown("""
 <style>
-    /* Global Base Styling */
+    @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+    /* Global Base */
+    html, body, [class*="css"] {
+        font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif !important;
+    }
+
+    /* Clean White / Soft Slate Background */
     .stApp {
-        background: radial-gradient(circle at 10% 20%, #0d1b2a 0%, #08111e 90%);
-        color: #f8fafc;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        background-color: #f8fafc !important;
+        color: #0f172a !important;
     }
 
-    /* Main Modern Header */
-    .ignis-header {
-        background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-        border: 1px solid #334155;
-        border-left: 6px solid #ff6b35;
-        border-radius: 12px;
-        padding: 20px 26px;
-        margin-bottom: 24px;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    /* Container Spacing */
+    .block-container {
+        padding-top: 1.8rem !important;
+        padding-bottom: 3.5rem !important;
+        max-width: 1380px !important;
     }
 
-    /* Cards */
-    .ignis-card {
-        background: #1e293b;
-        border: 1px solid #334155;
-        border-radius: 10px;
-        padding: 20px;
-        margin-bottom: 18px;
-        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+    /* Top App Navigation Bar (Light Clean) */
+    .ignis-navbar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 14px 22px;
+        margin-bottom: 22px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05), 0 10px 15px -5px rgba(0, 0, 0, 0.02);
     }
-
-    /* Report Priority Cards with Vibrant Glowing Left Borders */
-    .card-critical {
-        background: #1e293b;
-        border: 1px solid #475569;
-        border-left: 6px solid #ef4444 !important;
-        border-radius: 8px;
-        padding: 18px;
-        margin-bottom: 16px;
-        box-shadow: 0 4px 14px rgba(239, 68, 68, 0.2);
-    }
-    .card-high {
-        background: #1e293b;
-        border: 1px solid #475569;
-        border-left: 6px solid #f97316 !important;
-        border-radius: 8px;
-        padding: 18px;
-        margin-bottom: 16px;
-        box-shadow: 0 4px 14px rgba(249, 115, 22, 0.2);
-    }
-    .card-medium {
-        background: #1e293b;
-        border: 1px solid #475569;
-        border-left: 6px solid #f59e0b !important;
-        border-radius: 8px;
-        padding: 18px;
-        margin-bottom: 16px;
-        box-shadow: 0 4px 14px rgba(245, 158, 11, 0.15);
-    }
-    .card-low {
-        background: #1e293b;
-        border: 1px solid #475569;
-        border-left: 6px solid #10b981 !important;
-        border-radius: 8px;
-        padding: 18px;
-        margin-bottom: 16px;
-        box-shadow: 0 4px 14px rgba(16, 185, 129, 0.15);
-    }
-
-    /* Badges */
-    .badge-critical {
-        background-color: #ef4444;
-        color: #ffffff;
-        font-weight: 700;
-        font-size: 11px;
-        padding: 4px 10px;
-        border-radius: 6px;
-        letter-spacing: 0.5px;
-    }
-    .badge-high {
-        background-color: #f97316;
-        color: #ffffff;
-        font-weight: 700;
-        font-size: 11px;
-        padding: 4px 10px;
-        border-radius: 6px;
-        letter-spacing: 0.5px;
-    }
-    .badge-medium {
-        background-color: #f59e0b;
+    .ignis-brand-title {
+        font-size: 20px;
+        font-weight: 800;
         color: #0f172a;
-        font-weight: 700;
-        font-size: 11px;
-        padding: 4px 10px;
-        border-radius: 6px;
-        letter-spacing: 0.5px;
+        letter-spacing: -0.4px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
     }
-    .badge-low {
-        background-color: #10b981;
-        color: #ffffff;
-        font-weight: 700;
+    .ignis-brand-flame {
+        background: linear-gradient(135deg, #ff6b35 0%, #ea580c 100%);
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 17px;
+        box-shadow: 0 4px 12px rgba(234, 88, 12, 0.25);
+    }
+    .ignis-brand-sub {
+        font-size: 12.5px;
+        color: #64748b;
+        font-weight: 400;
+        margin-top: 2px;
+    }
+    .ignis-badge-role {
         font-size: 11px;
-        padding: 4px 10px;
-        border-radius: 6px;
-        letter-spacing: 0.5px;
+        font-weight: 700;
+        padding: 4px 12px;
+        border-radius: 20px;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
     }
 
-    /* CHATBOT HIGH-CONTRAST BUBBLE STYLING */
+    /* Modern Clean White Cards */
+    .ignis-card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 14px;
+        padding: 22px;
+        margin-bottom: 20px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 6px 16px -2px rgba(0, 0, 0, 0.03);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+    .ignis-card:hover {
+        box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.07);
+    }
+
+    .ignis-card-header {
+        border-bottom: 1px solid #f1f5f9;
+        padding-bottom: 14px;
+        margin-bottom: 18px;
+    }
+    .ignis-card-title {
+        font-size: 17px;
+        font-weight: 700;
+        color: #0f172a;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0;
+    }
+    .ignis-card-desc {
+        font-size: 13px;
+        color: #64748b;
+        margin: 4px 0 0 0;
+        line-height: 1.5;
+    }
+
+    /* KPI Metric Cards (Clean Light) */
+    .ignis-kpi-card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 18px 20px;
+        position: relative;
+        overflow: hidden;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.02);
+    }
+    .ignis-kpi-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+    }
+    .kpi-blue::before { background: #0284c7; }
+    .kpi-red::before { background: #ef4444; }
+    .kpi-orange::before { background: #f97316; }
+    .kpi-emerald::before { background: #10b981; }
+
+    .kpi-label {
+        font-size: 11.5px;
+        font-weight: 700;
+        color: #64748b;
+        letter-spacing: 0.5px;
+        text-transform: uppercase;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+    .kpi-value {
+        font-size: 32px;
+        font-weight: 800;
+        line-height: 1.1;
+        margin-top: 6px;
+        letter-spacing: -0.5px;
+    }
+
+    /* Report Priority Cards with Clean Border Left */
+    .report-card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        padding: 18px 20px;
+        margin-bottom: 18px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04), 0 4px 12px rgba(0, 0, 0, 0.03);
+        position: relative;
+        overflow: hidden;
+    }
+    .card-critical { border-left: 5px solid #ef4444 !important; }
+    .card-high { border-left: 5px solid #f97316 !important; }
+    .card-medium { border-left: 5px solid #f59e0b !important; }
+    .card-low { border-left: 5px solid #10b981 !important; }
+
+    /* Priority Badges (Light Pastel Contrast) */
+    .badge-prio {
+        font-size: 11px;
+        font-weight: 700;
+        padding: 4px 10px;
+        border-radius: 6px;
+        letter-spacing: 0.3px;
+        display: inline-block;
+    }
+    .badge-critical { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    .badge-high { background: #ffedd5; color: #9a3412; border: 1px solid #fdba74; }
+    .badge-medium { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+    .badge-low { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+
+    /* Chatbot Bubbles (Clean Light High-Contrast) */
     .chat-bubble-assistant {
-        background-color: #0f172a;
-        border: 1px solid #38bdf8;
-        border-radius: 10px;
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-left: 4px solid #0284c7;
+        border-radius: 12px;
         padding: 14px 18px;
-        margin-bottom: 12px;
-        color: #ffffff !important;
+        margin-bottom: 14px;
+        color: #0f172a !important;
         font-size: 14px !important;
         line-height: 1.6 !important;
-        box-shadow: 0 4px 12px rgba(56, 189, 248, 0.15);
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
     }
     .chat-bubble-assistant b, .chat-bubble-assistant strong {
-        color: #38bdf8 !important;
+        color: #0284c7 !important;
     }
-
     .chat-bubble-user {
-        background-color: #0369a1;
+        background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%);
         border: 1px solid #0284c7;
-        border-radius: 10px;
-        padding: 12px 16px;
-        margin-bottom: 12px;
+        border-radius: 12px;
+        padding: 12px 18px;
+        margin-bottom: 14px;
         color: #ffffff !important;
         font-size: 14px !important;
         line-height: 1.5 !important;
         text-align: right;
+        margin-left: 18%;
+        box-shadow: 0 2px 8px rgba(2, 132, 199, 0.25);
     }
 
-    /* Buttons */
-    .stButton > button {
-        background: linear-gradient(135deg, #ff6b35 0%, #ea580c 100%);
-        color: #ffffff !important;
-        font-weight: 600;
-        border: none;
-        border-radius: 8px;
-        padding: 9px 20px;
-        transition: all 0.2s ease;
+    /* Uniform Form Controls (Clean White Background) */
+    .stTextInput > div > div > input,
+    .stSelectbox > div > div,
+    .stNumberInput > div > div > input {
+        background-color: #ffffff !important;
+        color: #0f172a !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 9px !important;
+        font-size: 13.5px !important;
+        padding: 9px 12px !important;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+        transition: border-color 0.2s, box-shadow 0.2s;
     }
-    .stButton > button:hover {
-        background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%);
-        box-shadow: 0 4px 14px rgba(255, 107, 53, 0.35);
-        transform: translateY(-1px);
-    }
-
-    /* Form Submit Button — Selalu Terang Tanpa Perlu Hover */
-    .stFormSubmitButton > button {
-        background: linear-gradient(135deg, #fb923c 0%, #ff6b35 100%) !important;
-        color: #ffffff !important;
-        font-weight: 700 !important;
-        font-size: 15px !important;
-        border: none !important;
-        border-radius: 8px !important;
-        padding: 12px 24px !important;
-        box-shadow: 0 4px 20px rgba(255, 107, 53, 0.55) !important;
-        letter-spacing: 0.3px !important;
-    }
-    .stFormSubmitButton > button:hover {
-        background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%) !important;
-        box-shadow: 0 6px 24px rgba(255, 107, 53, 0.7) !important;
-        transform: translateY(-1px) !important;
+    .stTextInput > div > div > input:focus,
+    .stSelectbox > div > div:focus-within,
+    .stNumberInput > div > div > input:focus {
+        border-color: #ea580c !important;
+        box-shadow: 0 0 0 3px rgba(234, 88, 12, 0.12) !important;
     }
 
-    /* Input Fields */
-    .stTextInput > div > div > input, 
-    .stSelectbox > div > div {
-        background-color: #0f172a !important;
-        color: #e2e8f0 !important;
-        border: 1px solid #334155 !important;
-        border-radius: 8px;
-        font-size: 14px;
-    }
-
-    /* Textarea — latar terang, teks hitam */
+    /* Uniform Textarea (Clean White Background) */
     .stTextArea textarea,
-    div[data-testid="stTextArea"] textarea,
-    .stTextArea div[data-baseweb="textarea"],
-    .stTextArea div[data-baseweb="base-input"] {
-        background-color: #f8fafc !important;
+    div[data-testid="stTextArea"] textarea {
+        background-color: #ffffff !important;
         color: #0f172a !important;
         -webkit-text-fill-color: #0f172a !important;
         caret-color: #0f172a !important;
-        opacity: 1 !important;
-    }
-    .stTextArea textarea {
-        border: 1px solid #94a3b8 !important;
-        border-radius: 8px !important;
-        font-size: 14px !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 9px !important;
+        font-size: 13.5px !important;
         line-height: 1.6 !important;
-        pointer-events: auto !important;
-    }
-    .stTextArea textarea::placeholder {
-        color: #64748b !important;
-        -webkit-text-fill-color: #64748b !important;
-        opacity: 1 !important;
+        padding: 10px 14px !important;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
     }
     .stTextArea textarea:focus {
-        border-color: #38bdf8 !important;
-        box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.5) !important;
-    }
-    .stTextInput > div > div > input:focus {
-        border-color: #38bdf8 !important;
-        box-shadow: 0 0 0 1px #38bdf8 !important;
+        border-color: #ea580c !important;
+        box-shadow: 0 0 0 3px rgba(234, 88, 12, 0.12) !important;
     }
 
-    /* Tabs */
+    /* Standard Buttons (Light Outline) */
+    .stButton > button {
+        background: #ffffff;
+        color: #1e293b !important;
+        border: 1px solid #cbd5e1;
+        font-weight: 600;
+        border-radius: 8px;
+        padding: 8px 16px;
+        font-size: 13.5px;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+    .stButton > button:hover {
+        background: #f8fafc;
+        border-color: #94a3b8;
+        color: #0f172a !important;
+        transform: translateY(-1px);
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+    }
+
+    /* Form Submit Main Button (Vibrant Flame Orange) */
+    .stFormSubmitButton > button {
+        background: linear-gradient(135deg, #ff6b35 0%, #ea580c 100%) !important;
+        color: #ffffff !important;
+        font-weight: 700 !important;
+        font-size: 14.5px !important;
+        border: none !important;
+        border-radius: 9px !important;
+        padding: 11px 24px !important;
+        box-shadow: 0 4px 14px rgba(234, 88, 12, 0.3) !important;
+        letter-spacing: 0.3px !important;
+        transition: all 0.2s ease !important;
+    }
+    .stFormSubmitButton > button:hover {
+        background: linear-gradient(135deg, #ea580c 0%, #c2410c 100%) !important;
+        box-shadow: 0 6px 18px rgba(234, 88, 12, 0.45) !important;
+        transform: translateY(-1px) !important;
+    }
+
+    /* Clean Tabs Styling */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background-color: #0f172a;
-        padding: 6px;
-        border-radius: 10px;
-        border: 1px solid #334155;
+        gap: 6px;
+        background-color: #f1f5f9;
+        padding: 5px;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+        margin-bottom: 18px;
     }
     .stTabs [data-baseweb="tab"] {
-        color: #94a3b8 !important;
-        border-radius: 6px;
+        color: #64748b !important;
+        border-radius: 8px;
         padding: 8px 18px;
         font-weight: 600;
         font-size: 13px;
+        border: none !important;
+        transition: all 0.2s ease;
     }
     .stTabs [aria-selected="true"] {
-        background-color: #1e293b !important;
-        color: #38bdf8 !important;
-        border-bottom: 2px solid #38bdf8 !important;
+        background-color: #ffffff !important;
+        color: #ea580c !important;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+    }
+
+    /* Emergency Contact Card Grid */
+    .contact-card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 12px 14px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.03);
+        transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .contact-card:hover {
+        border-color: #0284c7;
+        box-shadow: 0 2px 8px rgba(2, 132, 199, 0.1);
+    }
+    .contact-icon {
+        width: 36px;
+        height: 36px;
+        background: #f0f9ff;
+        color: #0284c7;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        flex-shrink: 0;
+    }
+
+    /* Section Step Pill */
+    .step-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12px;
+        font-weight: 700;
+        color: #0284c7;
+        background: #f0f9ff;
+        border: 1px solid #bae6fd;
+        padding: 4px 10px;
+        border-radius: 6px;
+        margin-bottom: 12px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -636,206 +427,245 @@ PRESET_PATOKAN_KLABAT = {
 }
 
 # ==============================================================================
-# FITUR 1: HALAMAN LOGIN SISTEM
+# FITUR 1: HALAMAN LOGIN SISTEM (CLEAN LIGHT)
 # ==============================================================================
 def render_login_view():
     st.markdown("""
-    <div style="max-width: 580px; margin: 40px auto 20px auto; text-align: center;">
-        <div style="font-size: 38px; font-weight: 800; color: #ffffff; letter-spacing: -0.5px;">
-            IGNIS <span style="color: #ff6b35;">KLABAT</span>
+    <div style="max-width: 540px; margin: 35px auto 15px auto; text-align: center;">
+        <div style="display: inline-flex; align-items: center; justify-content: center; width: 56px; height: 56px; background: linear-gradient(135deg, #ff6b35 0%, #ea580c 100%); border-radius: 14px; font-size: 26px; box-shadow: 0 6px 18px rgba(234, 88, 12, 0.3); margin-bottom: 14px;">
+            🔥
         </div>
-        <p style="color: #94a3b8; font-size: 14px; margin-top: 6px;">
-            Sistem Informasi Mitigasi Kebakaran Hutan Gunung Klabat, Minahasa Utara
+        <div style="font-size: 32px; font-weight: 800; color: #0f172a; letter-spacing: -0.6px; margin-bottom: 4px;">
+            IGNIS <span style="color: #ea580c;">KLABAT</span>
+        </div>
+        <p style="color: #64748b; font-size: 13.5px; line-height: 1.5; margin: 0 auto; max-width: 460px;">
+            Sistem Intelijen Geospasial & Pendukung Keputusan Mitigasi Kebakaran Hutan Gunung Klabat (1.995 mdpl), Minahasa Utara
         </p>
     </div>
     """, unsafe_allow_html=True)
 
-    c_center = st.columns([1, 1.8, 1])[1]
+    c_left, c_center, c_right = st.columns([1, 1.8, 1])
     with c_center:
         st.markdown("""
-        <div class="ignis-card" style="border-top: 4px solid #ff6b35;">
-            <h3 style="margin: 0 0 6px 0; color: #ffffff; font-size: 18px; text-align: center;">Autentikasi Pengguna</h3>
-            <p style="color: #94a3b8; font-size: 12px; text-align: center; margin-bottom: 20px;">
-                Silakan masuk sesuai dengan kewenangan peran Anda.
-            </p>
+        <div class="ignis-card" style="border-top: 3px solid #ea580c; padding: 22px 24px; margin-bottom: 16px;">
+            <div style="text-align: center; margin-bottom: 14px;">
+                <span style="font-size: 16px; font-weight: 700; color: #0f172a;">Portal Autentikasi Pengguna</span>
+                <p style="font-size: 12.5px; color: #64748b; margin: 2px 0 0 0;">Pilih tab peran untuk mengakses sistem.</p>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
-        tab_warga, tab_damkar = st.tabs(["Masyarakat & Pendaki", "Regu Pemadam & BPBD"])
+        tab_warga, tab_damkar = st.tabs(["👤 Masyarakat & Pendaki", "🚒 Regu Pemadam & BPBD"])
 
         # TAB 1: LOGIN WARGA / PENDAKI
         with tab_warga:
-            st.markdown("<p style='font-size: 13px; color: #cbd5e1;'>Akses untuk warga lereng atau pendaki yang hendak melapor kebakaran serta konsultasi evakuasi darurat.</p>", unsafe_allow_html=True)
-            w_user = st.text_input("Username:", value="warga", key="w_user")
+            st.markdown("""
+            <div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 12px; color: #0369a1;">
+                <b>Akses Publik:</b> Untuk warga desa lereng Klabat atau pendaki yang melihat kepulan asap serta membutuhkan panduan evakuasi darurat.
+            </div>
+            """, unsafe_allow_html=True)
+
+            w_user = st.text_input("Nama Pengguna / Pelapor:", value="warga", key="w_user")
             w_pass = st.text_input("Kata Sandi:", type="password", value="warga123", key="w_pass")
-            
-            if st.button("Masuk Sebagai Masyarakat / Pendaki", use_container_width=True, key="btn_login_warga"):
+
+            if st.button("Masuk Sebagai Warga / Pendaki", use_container_width=True, key="btn_login_warga"):
                 if w_user.strip() and w_pass.strip():
                     st.session_state.logged_in = True
                     st.session_state.user_role = "masyarakat"
                     st.session_state.username = w_user.strip()
-                    st.success("Berhasil masuk ke Portal Masyarakat!")
                     st.rerun()
                 else:
-                    st.error("Silakan masukkan username dan kata sandi.")
+                    st.error("Silakan masukkan nama pengguna dan kata sandi.")
 
         # TAB 2: LOGIN PETUGAS DAMKAR & BPBD
         with tab_damkar:
-            st.markdown("<p style='font-size: 13px; color: #cbd5e1;'>Akses khusus personel Satgas Damkar Airmadidi, BPBD Minahasa Utara, dan Pos Registrasi Klabat.</p>", unsafe_allow_html=True)
+            st.markdown("""
+            <div style="background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; font-size: 12px; color: #c2410c;">
+                <b>Akses Khusus:</b> Personel Satgas Pemadam Airmadidi, BPBD Minahasa Utara, dan Pos Registrasi Klabat.
+            </div>
+            """, unsafe_allow_html=True)
+
             d_user = st.text_input("ID Personel / Username:", value="damkar", key="d_user")
             d_pass = st.text_input("Kata Sandi Petugas:", type="password", value="damkar123", key="d_pass")
-            
+
             if st.button("Masuk Sebagai Regu Pemadam & BPBD", use_container_width=True, key="btn_login_damkar"):
-                if d_user.strip() in ["damkar", "bpbd", "petugas", "admin"] and d_pass.strip() in ["damkar123", "minut112", "admin123"]:
+                if d_user.strip().lower() in ["damkar", "bpbd", "petugas", "admin"] and d_pass.strip() in ["damkar123", "minut112", "admin123"]:
                     st.session_state.logged_in = True
                     st.session_state.user_role = "damkar"
                     st.session_state.username = d_user.strip().upper()
-                    st.success("Autentikasi Petugas Berhasil!")
                     st.rerun()
                 else:
-                    st.error("Kredensial tidak valid. Gunakan username 'damkar' dan sandi 'damkar123'.")
+                    st.error("Kredensial tidak valid. Silakan gunakan ID 'damkar' dan sandi 'damkar123'.")
 
         st.markdown("""
-        <div style="background: rgba(15, 23, 42, 0.6); padding: 10px 14px; border-radius: 6px; border: 1px solid #334155; margin-top: 15px; font-size: 11px; color: #94a3b8; text-align: center;">
-            Kredensial Pengujian: <b>warga</b> (sandi: warga123) | <b>damkar</b> (sandi: damkar123)
+        <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 14px; margin-top: 16px; font-size: 12px; color: #64748b; text-align: center;">
+            🔑 <b>Kredensial Pengujian:</b> Warga: <code>warga / warga123</code> • Petugas: <code>damkar / damkar123</code>
         </div>
         """, unsafe_allow_html=True)
 
-# Jika belum login, tampilkan halaman login
+# Guard Autentikasi
 if not st.session_state.logged_in:
     render_login_view()
     st.stop()
 
 # ==============================================================================
-# HEADER SAAT LOGIN (DILENGKAPI TOMBOL LOGOUT)
+# HEADER NAVIGASI SAAT LOGIN (INTEGRATED LIGHT TOPBAR)
 # ==============================================================================
-role_badge_text = "PORTAL MASYARAKAT & PENDAKI" if st.session_state.user_role == "masyarakat" else "PUSAT KOMANDO REGU PEMADAM & BPBD"
-role_badge_color = "#38bdf8" if st.session_state.user_role == "masyarakat" else "#ff6b35"
+is_masyarakat = (st.session_state.user_role == "masyarakat")
+role_title = "Portal Masyarakat & Pendaki" if is_masyarakat else "Pusat Komando Satgas Damkar & BPBD"
+role_badge_bg = "#f0f9ff" if is_masyarakat else "#fff7ed"
+role_badge_color = "#0369a1" if is_masyarakat else "#c2410c"
+role_badge_border = "#bae6fd" if is_masyarakat else "#fed7aa"
+role_icon = "👤" if is_masyarakat else "🚒"
 
-st.markdown(f"""
-<div class="ignis-header">
-    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-        <div>
-            <div style="font-size: 22px; font-weight: 800; color: #ffffff;">
-                IGNIS - Mitigasi Kebakaran Hutan Gunung Klabat
-            </div>
-            <div style="font-size: 12px; color: #94a3b8; margin-top: 4px;">
-                Ruang Lingkup: Kawasan Gunung Klabat (1.995 mdpl), Minahasa Utara, Sulawesi Utara
-            </div>
-        </div>
-        <div style="text-align: right;">
-            <span style="background-color: {role_badge_color}; color: #0f172a; font-weight: 800; font-size: 11px; padding: 4px 10px; border-radius: 4px; letter-spacing: 0.5px;">
-                {role_badge_text}
-            </span>
-            <div style="font-size: 12px; color: #f1f5f9; margin-top: 5px;">
-                Pengguna: <b>{st.session_state.username}</b>
+col_nav_left, col_nav_right = st.columns([4.2, 1.1])
+
+with col_nav_left:
+    st.markdown(f"""
+    <div class="ignis-navbar" style="margin-bottom: 0;">
+        <div style="display: flex; align-items: center; gap: 14px;">
+            <div class="ignis-brand-flame">🔥</div>
+            <div>
+                <div class="ignis-brand-title">
+                    IGNIS <span style="color: #ea580c;">KLABAT</span>
+                    <span class="ignis-badge-role" style="background: {role_badge_bg}; color: {role_badge_color}; border: 1px solid {role_badge_border};">
+                        {role_icon} {role_title}
+                    </span>
+                </div>
+                <div class="ignis-brand-sub">
+                    Wilayah Pantau: Gunung Klabat (1.995 mdpl) • Minahasa Utara, Sulawesi Utara • Pengguna: <b>{st.session_state.username}</b>
+                </div>
             </div>
         </div>
     </div>
-</div>
-""", unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
-# Tombol Logout di baris navigasi
-col_head_space, col_logout = st.columns([6, 1])
-with col_logout:
-    if st.button("Keluar (Logout)", use_container_width=True):
+with col_nav_right:
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+    if st.button("🚪 Keluar", use_container_width=True):
         st.session_state.logged_in = False
         st.session_state.user_role = None
         st.session_state.username = None
         st.rerun()
 
-st.markdown("<hr style='border: none; border-top: 1px solid #334155; margin: 10px 0 20px 0;'>", unsafe_allow_html=True)
+st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
 # ==============================================================================
 # PERAN 1: MASYARAKAT / PENDAKI (USER 1)
 # ==============================================================================
-if st.session_state.user_role == "masyarakat":
-    col_lapor, col_chat = st.columns([1.1, 1], gap="large")
+if is_masyarakat:
+    # Banner Petunjuk (Soft Light Tint)
+    st.markdown("""
+    <div style="background: #ffffff; border: 1px solid #e2e8f0; border-left: 4px solid #0284c7; border-radius: 10px; padding: 12px 18px; margin-bottom: 20px; font-size: 13px; color: #334155; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
+        💡 <b>Pelaporan Cepat & Aman:</b> Kirimkan informasi titik api di lereng atau jalur Klabat. AI akan menghitung prioritas risiko secara otomatis. Jika situasi mendesak, gunakan Asisten AI di panel kanan untuk panduan evakuasi darurat.
+    </div>
+    """, unsafe_allow_html=True)
+
+    col_lapor, col_chat = st.columns([1.15, 1], gap="large")
 
     # ---------- FORMULIR INFORMASI KEBAKARAN (TANPA PILIH KEPARAHAN) ----------
     with col_lapor:
         st.markdown("""
-        <div class="ignis-card" style="border-top: 4px solid #ff6b35;">
-            <h3 style="margin: 0 0 4px 0; color: #ffffff; font-size: 18px;">Formulir Informasi Kebakaran Masyarakat</h3>
-            <p style="color: #94a3b8; font-size: 12px; margin: 0 0 16px 0;">
-                Kirim informasi titik api yang Anda lihat. AI akan menganalisis otomatis tingkat prioritas sehingga Anda tidak perlu memilih tingkat keparahan.
-            </p>
+        <div class="ignis-card">
+            <div class="ignis-card-header">
+                <h3 class="ignis-card-title">📝 Formulir Pelaporan Kebakaran Cepat</h3>
+                <p class="ignis-card-desc">
+                    Laporan langsung diteruskan ke Posko Damkar Minahasa Utara. AI mengotomasi penilaian keparahan sehingga Anda cukup menceritakan kondisi yang tampak.
+                </p>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
         with st.form("form_lapor_masyarakat_ai", clear_on_submit=False):
-            st.markdown("##### 1. Identitas Pelapor")
-            nama_user = st.text_input("Nama Lengkap Pelapor *", placeholder="Contoh: Rendy Kaligis", value=st.session_state.username if st.session_state.username != "warga" else "")
-            kontak_user = st.text_input("Nomor Telepon / WhatsApp Aktif", placeholder="Contoh: 081244556677")
+            st.markdown('<div class="step-pill">1. Identitas & Kontak Pelapor</div>', unsafe_allow_html=True)
+            c_nama, c_telp = st.columns([1.2, 1])
+            with c_nama:
+                nama_user = st.text_input(
+                    "Nama Lengkap Pelapor *",
+                    placeholder="Contoh: Rendy Kaligis",
+                    value=st.session_state.username if st.session_state.username != "warga" else ""
+                )
+            with c_telp:
+                kontak_user = st.text_input(
+                    "Nomor HP / WhatsApp Aktif *",
+                    placeholder="Contoh: 081244556677"
+                )
 
-            st.markdown("##### 2. Titik Lokasi Kebakaran")
+            st.markdown('<div class="step-pill" style="margin-top: 14px;">2. Titik Lokasi & Patokan Klabat</div>', unsafe_allow_html=True)
             preset_choice = st.selectbox(
-                "Pilih Titik Patokan Gunung Klabat (Opsional untuk Membantu Titik):",
+                "Pilih Titik Patokan Gunung Klabat (Membantu Menentukan Posisi):",
                 list(PRESET_PATOKAN_KLABAT.keys())
             )
             p_lat, p_lon, p_area, p_jarak, p_veg = PRESET_PATOKAN_KLABAT[preset_choice]
 
             default_gmaps = f"https://www.google.com/maps?q={p_lat:.5f},{p_lon:.5f}" if p_lat != 1.4650 else "https://www.google.com/maps?q=1.4658,124.9935"
             link_lokasi = st.text_input(
-                "Link Lokasi Terbakar (Tautan Google Maps / Share Location) *",
+                "Tautan Lokasi (Google Maps / Share Location WhatsApp) *",
                 value=default_gmaps,
                 placeholder="https://maps.app.goo.gl/... atau koordinat"
             )
 
             c_lat, c_lon = st.columns(2)
             with c_lat:
-                lat_input = st.number_input("Latitude", value=float(p_lat), format="%.5f")
+                lat_input = st.number_input("Garis Lintang (Latitude)", value=float(p_lat), format="%.5f")
             with c_lon:
-                lon_input = st.number_input("Longitude", value=float(p_lon), format="%.5f")
+                lon_input = st.number_input("Garis Bujur (Longitude)", value=float(p_lon), format="%.5f")
 
-            st.markdown("##### 3. Bukti Foto & Deskripsi Kejadian")
-            
-            tab_file, tab_url = st.tabs(["Unggah File Foto", "Gunakan Tautan Foto"])
+            st.markdown('<div class="step-pill" style="margin-top: 14px;">3. Bukti Foto & Situasi Kebakaran</div>', unsafe_allow_html=True)
+
+            tab_file, tab_url = st.tabs(["📁 Unggah Foto Bukti", "🔗 Gunakan Tautan Foto URL"])
             uploaded_image_path = None
-            
+
             with tab_file:
-                uploaded_file = st.file_uploader("Pilih foto kebakaran dari galeri/kamera:", type=["jpg", "jpeg", "png", "webp"])
+                uploaded_file = st.file_uploader(
+                    "Pilih foto kebakaran dari galeri atau kamera:",
+                    type=["jpg", "jpeg", "png", "webp"]
+                )
                 if uploaded_file is not None:
                     filename = f"klb_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}"
                     save_path = os.path.join(UPLOAD_DIR, filename)
                     with open(save_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     uploaded_image_path = save_path
-                    st.image(uploaded_file, caption="Pratinjau Foto Bukti", use_container_width=True)
+                    st.image(uploaded_file, caption="Pratinjau Foto Lampiran", use_container_width=True)
 
             with tab_url:
                 foto_url_input = st.text_input(
-                    "Tautan Gambar Kebakaran (URL):",
+                    "Tautan URL Gambar Bukti:",
                     value="https://images.unsplash.com/photo-1542385151-efd9000785a0?w=800&auto=format&fit=crop&q=60"
                 )
 
             deskripsi_tempat = st.text_area(
-                "Deskripsi Tempat & Kondisi Api *",
+                "Deskripsi Kejadian & Kondisi Api *",
                 placeholder="Ceritakan patokan tempat (misal: dekat Pos 3 atau dekat kebun cengkeh warga), kondisi asap, apakah ada pendaki yang turun, atau jarak ke pemukiman...",
                 height=110,
                 value="Kepulan asap membubung tinggi di semak lereng arah jalur pendakian. Angin bertiup cukup kencang ke arah atas lereng dan dikhawatirkan membahayakan pendaki."
             )
 
-            # Estimasi jarak terdekat
-            jarak_input = st.number_input("Perkiraan Jarak Titik Api ke Pemukiman Warga (km):", value=float(p_jarak), min_value=0.1, max_value=20.0, step=0.1)
+            jarak_input = st.number_input(
+                "Perkiraan Jarak Titik Api ke Pemukiman Warga Terdekat (km):",
+                value=float(p_jarak),
+                min_value=0.1,
+                max_value=20.0,
+                step=0.1
+            )
 
             st.markdown("""
-            <div style="background-color: rgba(56, 189, 248, 0.1); border-left: 4px solid #38bdf8; padding: 10px 14px; border-radius: 4px; font-size: 12px; color: #bae6fd; margin-bottom: 12px;">
-                Prioritas penanganan akan dihitung secara otomatis oleh AI (Gemini 3.8 Flash) berdasarkan deskripsi, ancaman keselamatan warga, dan jalur pendaki Gunung Klabat.
+            <div style="background-color: #f0fdf4; border: 1px solid #bbf7d0; border-left: 4px solid #16a34a; padding: 10px 14px; border-radius: 6px; font-size: 12px; color: #166534; margin: 12px 0 16px 0;">
+                🤖 <b>Klasifikasi Otomatis AI (Gemini 3.8 Flash):</b> Prioritas bahaya akan dinilai secara instan dari analisis deskripsi, vegetasi, dan ancaman terhadap keselamatan pemukiman lereng Gunung Klabat.
             </div>
             """, unsafe_allow_html=True)
 
-            btn_submit = st.form_submit_button("Kirim Laporan Kebakaran Sekarang", use_container_width=True)
+            btn_submit = st.form_submit_button("🔥 Kirim Laporan ke Posko Damkar Sekarang", use_container_width=True)
 
         if btn_submit:
             if not nama_user.strip() or not deskripsi_tempat.strip() or not link_lokasi.strip():
-                st.error("Mohon lengkapi Nama Pelapor, Link Lokasi, dan Deskripsi Tempat Kebakaran.")
+                st.error("Mohon lengkapi Nama Pelapor, Tautan Lokasi, dan Deskripsi Kejadian.")
             else:
                 final_image = uploaded_image_path if uploaded_image_path else foto_url_input
                 area_nama = p_area if p_lat != 1.4650 else "Kawasan Lereng Gunung Klabat"
 
                 with st.spinner("AI sedang menganalisis tingkat prioritas risiko laporan Anda..."):
-                    # Panggil AI Classifier otomatis (Gemini 3.8 Flash)
                     ai_result = classify_fire_priority_ai(
                         deskripsi=deskripsi_tempat.strip(),
                         lokasi_area=area_nama,
@@ -866,28 +696,38 @@ if st.session_state.user_role == "masyarakat":
                     }
 
                     new_id = insert_laporan(payload)
-                    st.success(f"Laporan berhasil dikirim ke Posko Damkar & BPBD Minahasa Utara! (Kode: KLB-{datetime.now().year}-{new_id:03d})")
-                    
+                    kode_gen = f"KLB-{datetime.now().year}-{new_id:03d}"
+
+                    st.success(f"Laporan berhasil dikirim ke Posko Damkar & BPBD Minahasa Utara! (Kode Laporan: {kode_gen})")
+
                     st.markdown(f"""
-                    <div style="background-color: #1e293b; border-left: 5px solid #ff6b35; padding: 14px; border-radius: 6px; margin-top: 10px;">
-                        <div style="font-size: 13px; font-weight: bold; color: #ff6b35;">HASIL PENILAIAN PRIORITAS AI ({ai_result['source']}):</div>
-                        <div style="font-size: 15px; font-weight: bold; color: #ffffff; margin: 4px 0;">
-                            Prioritas: {ai_result['label_prioritas']} (Skor: {ai_result['skor_prioritas']}/100)
+                    <div style="background-color: #ffffff; border: 1px solid #e2e8f0; border-left: 5px solid #ea580c; padding: 16px 18px; border-radius: 10px; margin-top: 14px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-size: 12px; font-weight: 700; color: #ea580c; letter-spacing: 0.5px;">HASIL ANALISIS PRIORITAS AI ({ai_result['source']})</span>
+                            <span style="background: #fff7ed; color: #c2410c; font-weight: 800; font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid #fed7aa;">KODE: {kode_gen}</span>
                         </div>
-                        <div style="font-size: 13px; color: #cbd5e1; line-height: 1.5;">
+                        <div style="font-size: 16px; font-weight: 800; color: #0f172a; margin-bottom: 6px;">
+                            Prioritas: <span style="color: #ea580c;">{ai_result['label_prioritas']}</span> (Skor Risiko: {ai_result['skor_prioritas']}/100)
+                        </div>
+                        <div style="font-size: 13.5px; color: #334155; line-height: 1.6;">
                             {ai_result['alasan_prioritas']}
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
 
-    # ---------- CHATBOT AI ANTI-PANIK (KONTRAS TINGGI & TULISAN JELAS) ----------
+    # ---------- CHATBOT AI ANTI-PANIK (LIGHT CLEAN) ----------
     with col_chat:
         st.markdown("""
-        <div class="ignis-card" style="border-top: 4px solid #38bdf8;">
-            <h3 style="margin: 0 0 4px 0; color: #ffffff; font-size: 18px;">Asisten Tanggap Darurat & Panduan Anti-Panik</h3>
-            <p style="color: #94a3b8; font-size: 12px; margin: 0 0 16px 0;">
-                Konsultasikan situasi Anda untuk mendapatkan instruksi penyelamatan diri dan nomor darurat resmi.
-            </p>
+        <div class="ignis-card">
+            <div class="ignis-card-header">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <h3 class="ignis-card-title">💬 Asisten Darurat & Anti-Panik</h3>
+                    <span style="font-size: 11px; color: #047857; font-weight: 700; background: #d1fae5; padding: 3px 9px; border-radius: 12px; border: 1px solid #a7f3d0;">🟢 Online 24 Jam</span>
+                </div>
+                <p class="ignis-card-desc">
+                    Panduan keselamatan langkah-demi-langkah bagi pendaki dan warga seputar lereng Gunung Klabat.
+                </p>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -896,51 +736,56 @@ if st.session_state.user_role == "masyarakat":
                 {
                     "role": "assistant",
                     "content": (
-                        "Halo. Saya adalah Asisten Darurat IGNIS untuk kawasan Gunung Klabat.\n\n"
-                        "Jika Anda melihat kebakaran atau berada di sekitar kepulan asap:\n"
-                        "1. Tarik napas perlahan dan tetap tenang. Jangan panik.\n"
-                        "2. Segera lindungi saluran pernapasan dengan kain basah.\n"
-                        "3. Tanyakan langkah evakuasi atau nomor telepon posko yang dapat Anda hubungi sekarang."
+                        "Halo. Saya adalah **Asisten Siaga IGNIS** untuk kawasan Gunung Klabat.\n\n"
+                        "Jika Anda melihat kepulan asap atau berada dekat kobaran api:\n"
+                        "1. **Tarik napas perlahan dan tetap tenang.** Jangan panik.\n"
+                        "2. **Basahi kain atau masker** dengan air minum untuk melindungi saluran pernapasan.\n"
+                        "3. **Hindari berlari mendaki ke atas puncak** jika api berasal dari bawah lereng.\n\n"
+                        "Silakan tanyakan panduan evakuasi atau nomor telepon posko yang dapat Anda hubungi."
                     )
                 }
             ]
 
         # Tombol Pertanyaan Cepat
-        st.markdown("<div style='font-size: 11px; color: #94a3b8; font-weight: bold; margin-bottom: 6px;'>PANDUAN DARURAT CEPAT:</div>", unsafe_allow_html=True)
+        st.markdown("<div style='font-size: 11.5px; color: #64748b; font-weight: 700; margin-bottom: 8px;'>PANDUAN CEPAT:</div>", unsafe_allow_html=True)
         q1, q2, q3 = st.columns(3)
         quick_ask = None
         with q1:
-            if st.button("Saya di Jalur Pendakian", use_container_width=True):
+            if st.button("🧗 Jalur Pendakian", use_container_width=True):
                 quick_ask = "Saya sedang berada di jalur pendakian Gunung Klabat dan melihat asap kebakaran. Apa tindakan pertama yang harus saya ambil?"
         with q2:
-            if st.button("Api Dekat Pemukiman", use_container_width=True):
+            if st.button("🏡 Dekat Pemukiman", use_container_width=True):
                 quick_ask = "Api membakar semak dekat pekarangan rumah warga lereng. Tindakan apa yang aman untuk keluarga?"
         with q3:
-            if st.button("Nomor Posko Darurat", use_container_width=True):
+            if st.button("📞 Kontak Darurat", use_container_width=True):
                 quick_ask = "Berikan nomor telepon darurat Damkar, BPBD Minahasa Utara, dan Pos Registrasi Klabat."
 
-        # Kotak Tampilan Chat Bubble Kontras Tinggi
-        chat_box = st.container(height=390)
+        # Kotak Tampilan Chat Bubble Light
+        chat_box = st.container(height=410)
         with chat_box:
             for m in st.session_state.klabat_chat_messages:
                 if m["role"] == "user":
                     st.markdown(f"""
                     <div class="chat-bubble-user">
-                        <b>Anda:</b><br>{m['content']}
+                        <div style="font-size: 11px; opacity: 0.9; margin-bottom: 3px; font-weight: 600;">Anda</div>
+                        {m['content']}
                     </div>
                     """, unsafe_allow_html=True)
                 else:
                     st.markdown(f"""
                     <div class="chat-bubble-assistant">
-                        <span style="background-color: #0284c7; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;">ASISTEN RESMI IGNIS</span>
-                        <div style="margin-top: 8px;">
+                        <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+                            <span style="background-color: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700;">ASISTEN RESMI IGNIS</span>
+                            <span style="font-size: 11px; color: #64748b;">SOP Evakuasi Klabat</span>
+                        </div>
+                        <div style="margin-top: 4px;">
                             {m['content'].replace(chr(10), '<br>')}
                         </div>
                     </div>
                     """, unsafe_allow_html=True)
 
         # Input Chat
-        user_chat_input = st.chat_input("Tulis pertanyaan atau kondisi darurat Anda...")
+        user_chat_input = st.chat_input("Ketik pertanyaan situasi darurat Anda di sini...")
         if quick_ask:
             user_chat_input = quick_ask
 
@@ -949,7 +794,8 @@ if st.session_state.user_role == "masyarakat":
             with chat_box:
                 st.markdown(f"""
                 <div class="chat-bubble-user">
-                    <b>Anda:</b><br>{user_chat_input}
+                    <div style="font-size: 11px; opacity: 0.9; margin-bottom: 3px; font-weight: 600;">Anda</div>
+                    {user_chat_input}
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -957,8 +803,11 @@ if st.session_state.user_role == "masyarakat":
                     resp = get_anti_panic_response(user_chat_input)
                     st.markdown(f"""
                     <div class="chat-bubble-assistant">
-                        <span style="background-color: #0284c7; color: white; padding: 2px 6px; border-radius: 4px; font-size: 10px; font-weight: bold;">ASISTEN RESMI IGNIS</span>
-                        <div style="margin-top: 8px;">
+                        <div style="display: flex; align-items: center; gap: 6px; margin-bottom: 6px;">
+                            <span style="background-color: #e0f2fe; color: #0369a1; border: 1px solid #bae6fd; padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: 700;">ASISTEN RESMI IGNIS</span>
+                            <span style="font-size: 11px; color: #64748b;">{resp['source']}</span>
+                        </div>
+                        <div style="margin-top: 4px;">
                             {resp['answer'].replace(chr(10), '<br>')}
                         </div>
                     </div>
@@ -966,16 +815,54 @@ if st.session_state.user_role == "masyarakat":
                     st.session_state.klabat_chat_messages.append({"role": "assistant", "content": resp["answer"]})
             st.rerun()
 
-        # Kontak Darurat
-        with st.expander("Kontak Darurat Resmi Posko Minahasa Utara", expanded=False):
+        # Direktori Kontak Darurat Resmi
+        with st.expander("📞 Kontak Darurat Resmi Wilayah Minahasa Utara", expanded=False):
             st.markdown("""
-            - **Call Center Kedaruratan Minahasa Utara:** 112 (Bebas Pulsa)
-            - **Posko Damkar Minahasa Utara (Airmadidi):** (0431) 891-113
-            - **BPBD Minahasa Utara:** (0431) 892-112 / 0811-432-112
-            - **Basarnas Manado (Evakuasi Hutan Klabat):** 115 / (0431) 812-111
-            - **Polsek Airmadidi:** (0431) 891-110
-            - **Pos Registrasi Pendakian Klabat (Airmadidi Atas):** 0812-4455-6677
-            """)
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 6px;">
+                <div class="contact-card">
+                    <div class="contact-icon">🚨</div>
+                    <div>
+                        <div style="font-size: 11px; color: #64748b;">Call Center Darurat</div>
+                        <div style="font-size: 13.5px; font-weight: 700; color: #0f172a;">112 (Bebas Pulsa)</div>
+                    </div>
+                </div>
+                <div class="contact-card">
+                    <div class="contact-icon">🚒</div>
+                    <div>
+                        <div style="font-size: 11px; color: #64748b;">Damkar Minut (Airmadidi)</div>
+                        <div style="font-size: 13.5px; font-weight: 700; color: #0f172a;">(0431) 891-113</div>
+                    </div>
+                </div>
+                <div class="contact-card">
+                    <div class="contact-icon">🛡️</div>
+                    <div>
+                        <div style="font-size: 11px; color: #64748b;">BPBD Minahasa Utara</div>
+                        <div style="font-size: 13.5px; font-weight: 700; color: #0f172a;">0811-432-112</div>
+                    </div>
+                </div>
+                <div class="contact-card">
+                    <div class="contact-icon">🚁</div>
+                    <div>
+                        <div style="font-size: 11px; color: #64748b;">Basarnas Manado (Evakuasi)</div>
+                        <div style="font-size: 13.5px; font-weight: 700; color: #0f172a;">115 / (0431) 812-111</div>
+                    </div>
+                </div>
+                <div class="contact-card">
+                    <div class="contact-icon">👮</div>
+                    <div>
+                        <div style="font-size: 11px; color: #64748b;">Polsek Airmadidi</div>
+                        <div style="font-size: 13.5px; font-weight: 700; color: #0f172a;">(0431) 891-110</div>
+                    </div>
+                </div>
+                <div class="contact-card">
+                    <div class="contact-icon">⛺</div>
+                    <div>
+                        <div style="font-size: 11px; color: #64748b;">Pos Registrasi Klabat</div>
+                        <div style="font-size: 13.5px; font-weight: 700; color: #0f172a;">0812-4455-6677</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
 # ==============================================================================
 # PERAN 2: REGU PEMADAM & BPBD (USER 2)
@@ -987,63 +874,99 @@ else:
 
     total_aktif = len(df_aktif)
     total_selesai = len(df_riwayat)
-    total_kritis = int((df_aktif["label_prioritas"] == "Kritis").sum())
-    total_tinggi = int((df_aktif["label_prioritas"] == "Tinggi").sum())
+    total_kritis = int((df_aktif["label_prioritas"] == "Kritis").sum()) if not df_aktif.empty else 0
+    total_tinggi = int((df_aktif["label_prioritas"] == "Tinggi").sum()) if not df_aktif.empty else 0
 
     st.markdown("""
-    <div class="ignis-card" style="border-top: 4px solid #ff6b35;">
-        <h3 style="margin: 0 0 4px 0; color: #ffffff; font-size: 18px;">Pusat Komando & Disposisi Regu Pemadam Gunung Klabat</h3>
-        <p style="color: #94a3b8; font-size: 12px; margin: 0 0 16px 0;">
-            Pantau laporan kebakaran aktif yang diurutkan AI berdasarkan prioritas risiko, lakukan pemadaman, dan tandai saat api sudah berhasil diatasi.
-        </p>
+    <div class="ignis-card" style="padding: 18px 22px; margin-bottom: 20px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <h3 class="ignis-card-title">🚒 Pusat Komando & Disposisi Operasional Regu Pemadam Klabat</h3>
+                <p class="ignis-card-desc">
+                    Pantau laporan kebakaran aktif terurut prioritas risiko AI, kerahkan armada posko, dan arsipkan kasus setelah api berhasil dipadamkan.
+                </p>
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px;">
+                <span style="font-size: 12px; color: #64748b;">Status Siaga Armada:</span>
+                <span style="background: #d1fae5; color: #065f46; font-weight: 700; font-size: 11.5px; padding: 4px 10px; border-radius: 6px; border: 1px solid #a7f3d0;">
+                    🟢 SATGAS SIAGA PENUH
+                </span>
+            </div>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
-    # Metrics Eye-Catching
-    m1, m2, m3, m4 = st.columns(4)
-    with m1:
+    # 4 KPI Metrics Clean Light
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
         st.markdown(f"""
-        <div class="ignis-card" style="text-align: center; border-bottom: 3px solid #38bdf8; padding: 14px;">
-            <div style="font-size: 11px; color: #94a3b8; font-weight: bold;">ANTREAN AKTIF</div>
-            <div style="font-size: 28px; font-weight: bold; color: #38bdf8; margin-top: 4px;">{total_aktif}</div>
+        <div class="ignis-kpi-card kpi-blue">
+            <div class="kpi-label">
+                <span>ANTREAN AKTIF</span>
+                <span>📋</span>
+            </div>
+            <div class="kpi-value" style="color: #0284c7;">{total_aktif}</div>
+            <div style="font-size: 11.5px; color: #64748b; margin-top: 4px;">Memerlukan tindakan satgas</div>
         </div>
         """, unsafe_allow_html=True)
-    with m2:
+    with k2:
         st.markdown(f"""
-        <div class="ignis-card" style="text-align: center; border-bottom: 3px solid #ef4444; padding: 14px;">
-            <div style="font-size: 11px; color: #ef4444; font-weight: bold;">PRIORITAS KRITIS</div>
-            <div style="font-size: 28px; font-weight: bold; color: #ef4444; margin-top: 4px;">{total_kritis}</div>
+        <div class="ignis-kpi-card kpi-red">
+            <div class="kpi-label">
+                <span>PRIORITAS KRITIS</span>
+                <span>🚨</span>
+            </div>
+            <div class="kpi-value" style="color: #ef4444;">{total_kritis}</div>
+            <div style="font-size: 11.5px; color: #64748b; margin-top: 4px;">Ancaman dekat pemukiman</div>
         </div>
         """, unsafe_allow_html=True)
-    with m3:
+    with k3:
         st.markdown(f"""
-        <div class="ignis-card" style="text-align: center; border-bottom: 3px solid #f97316; padding: 14px;">
-            <div style="font-size: 11px; color: #f97316; font-weight: bold;">PRIORITAS TINGGI</div>
-            <div style="font-size: 28px; font-weight: bold; color: #f97316; margin-top: 4px;">{total_tinggi}</div>
+        <div class="ignis-kpi-card kpi-orange">
+            <div class="kpi-label">
+                <span>PRIORITAS TINGGI</span>
+                <span>🔥</span>
+            </div>
+            <div class="kpi-value" style="color: #ea580c;">{total_tinggi}</div>
+            <div style="font-size: 11.5px; color: #64748b; margin-top: 4px;">Jalur pendakian / kebun</div>
         </div>
         """, unsafe_allow_html=True)
-    with m4:
+    with k4:
         st.markdown(f"""
-        <div class="ignis-card" style="text-align: center; border-bottom: 3px solid #10b981; padding: 14px;">
-            <div style="font-size: 11px; color: #10b981; font-weight: bold;">SUDAH DIATASI</div>
-            <div style="font-size: 28px; font-weight: bold; color: #10b981; margin-top: 4px;">{total_selesai}</div>
+        <div class="ignis-kpi-card kpi-emerald">
+            <div class="kpi-label">
+                <span>SUDAH DIATASI</span>
+                <span>✅</span>
+            </div>
+            <div class="kpi-value" style="color: #10b981;">{total_selesai}</div>
+            <div style="font-size: 11.5px; color: #64748b; margin-top: 4px;">Api berhasil dipadamkan</div>
         </div>
         """, unsafe_allow_html=True)
 
+    st.markdown("<div style='height: 14px;'></div>", unsafe_allow_html=True)
+
     tab_aktif, tab_histori, tab_peta, tab_fishbone = st.tabs([
-        f"Antrean Penanganan Aktif ({total_aktif})",
-        f"Riwayat Penanganan Selesai ({total_selesai})",
-        "Peta Geospasial Gunung Klabat",
-        "Analisis Akar Masalah (Fishbone)"
+        f"🚨 Antrean Penanganan Aktif ({total_aktif})",
+        f"✅ Riwayat Selesai Dipadamkan ({total_selesai})",
+        "🗺️ Peta Geospasial Gunung Klabat",
+        "🐟 Analisis Akar Masalah (Fishbone RCA)"
     ])
 
     # ==================== TAB 1: ANTREAN AKTIF (URUTAN AI) ====================
     with tab_aktif:
-        st.markdown("#### Antrean Laporan Kebakaran Aktif di Lapangan")
-        st.caption("AI otomatis mengurutkan laporan yang paling mendesak di posisi teratas. Setelah api padam, klik tombol 'Tandai Sudah Diatasi' untuk memindahkannya ke tab riwayat.")
+        st.markdown("#### Daftar Kejadian Kebakaran yang Membutuhkan Pengerahan Regu")
+        st.caption("AI mengurutkan kejadian berdasarkan ancaman tertinggi ke pemukiman dan pendaki. Tandai 'Sudah Diatasi' begitu tim mengonfirmasi api padam.")
 
         if df_aktif.empty:
-            st.success("Seluruh titik kebakaran di kawasan Gunung Klabat telah berhasil diatasi! Tidak ada antrean aktif saat ini.")
+            st.markdown("""
+            <div style="text-align: center; padding: 45px 20px; background: #ffffff; border: 1px dashed #cbd5e1; border-radius: 12px; margin-top: 10px;">
+                <div style="font-size: 38px; margin-bottom: 8px;">🎉</div>
+                <div style="font-size: 16px; font-weight: 700; color: #0f172a;">Seluruh Titik Kebakaran Telah Teratasi!</div>
+                <div style="font-size: 13px; color: #64748b; max-width: 420px; margin: 4px auto 0 auto;">
+                    Tidak ada antrean laporan kebakaran aktif di lereng maupun jalur pendakian Gunung Klabat saat ini.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
         else:
             for idx, r in df_aktif.iterrows():
                 prio_label = r["label_prioritas"]
@@ -1060,177 +983,186 @@ else:
                     "badge-low"
                 )
 
-                with st.container():
-                    st.markdown(f"""
-                    <div class="{card_class}">
-                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-                            <div>
-                                <span style="font-size: 17px; font-weight: bold; color: #ffffff;">
-                                    {r['kode_laporan']} - {r['lokasi_area']}
-                                </span>
-                                <span style="font-size: 12px; color: #94a3b8; margin-left: 12px;">
-                                    Waktu Lapor: {r['tanggal_lapor']}
-                                </span>
-                            </div>
-                            <div>
-                                <span class="{badge_class}">PRIORITAS {prio_label.upper()} (SKOR: {r['skor_prioritas']})</span>
-                            </div>
+                st.markdown(f"""
+                <div class="report-card {card_class}">
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                        <div>
+                            <span style="font-size: 16px; font-weight: 800; color: #0f172a;">
+                                {r['kode_laporan']} • {r['lokasi_area']}
+                            </span>
+                            <span style="font-size: 12px; color: #64748b; margin-left: 10px;">
+                                ⏱️ {r['tanggal_lapor']}
+                            </span>
                         </div>
+                        <div>
+                            <span class="badge-prio {badge_class}">
+                                PRIORITAS {prio_label.upper()} (SKOR: {r['skor_prioritas']})
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                c_info, c_media, c_action = st.columns([1.4, 1.0, 1.3])
+
+                with c_info:
+                    st.markdown(f"**Pelapor:** {r['nama_user']} | Kontak: `{r.get('kontak_user') or 'Tanpa kontak'}`")
+                    st.markdown(f"**Vegetasi:** {r['tipe_vegetasi']} | **Jarak ke Rumah Warga:** {r['jarak_pemukiman_km']} km")
+                    st.markdown(f"**Deskripsi Kejadian:** *\"{r['deskripsi_tempat']}\"*")
+                    
+                    st.markdown(f"""
+                    <div style="background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 10px 12px; margin: 8px 0; font-size: 12.5px; color: #0f172a;">
+                        <span style="font-weight: 700; color: #0284c7;">🧠 Analisis AI:</span> {r['alasan_prioritas']}
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    st.markdown(f"**Status Operasional Saat Ini:** <span style='color: #d97706; font-weight: 700;'>{r['status_penanganan']}</span>", unsafe_allow_html=True)
+
+                with c_media:
+                    st.markdown("<div style='font-size: 12px; font-weight: 700; color: #64748b; margin-bottom: 4px;'>DOKUMENTASI FOTO:</div>", unsafe_allow_html=True)
+                    gambar_src = r['gambar_kebakaran']
+                    if gambar_src:
+                        try:
+                            if os.path.exists(gambar_src):
+                                img = Image.open(gambar_src)
+                                st.image(img, caption=r['kode_laporan'], use_container_width=True)
+                            else:
+                                st.image(gambar_src, caption=r['kode_laporan'], use_container_width=True)
+                        except Exception:
+                            st.caption("Foto bukti tidak dapat dimuat.")
+                    else:
+                        st.caption("Tanpa foto bukti.")
+
+                    link_gmaps = r['link_lokasi']
+                    st.markdown(f"""
+                    <div style="margin-top: 6px;">
+                        <a href="{link_gmaps}" target="_blank" style="display: block; text-align: center; background: #0284c7; color: #ffffff; padding: 7px 12px; border-radius: 6px; font-size: 12px; font-weight: 600; text-decoration: none;">
+                            📍 Buka Navigasi Rute Maps
+                        </a>
                     </div>
                     """, unsafe_allow_html=True)
 
-                    c_info, c_media, c_action = st.columns([1.4, 1, 1.3])
+                with c_action:
+                    st.markdown("<div style='font-size: 12px; font-weight: 700; color: #64748b; margin-bottom: 4px;'>TINDAKAN SATGAS DAMKAR:</div>", unsafe_allow_html=True)
 
-                    with c_info:
-                        st.markdown(f"**Nama Pelapor:** {r['nama_user']} | Kontak: `{r.get('kontak_user') or 'Tanpa kontak'}`")
-                        st.markdown(f"**Deskripsi Kejadian:** *\"{r['deskripsi_tempat']}\"*")
-                        st.markdown(f"**Alasan Prioritas AI:** <span style='color: #38bdf8; font-weight: 500;'>{r['alasan_prioritas']}</span>", unsafe_allow_html=True)
-                        st.markdown(f"**Vegetasi:** {r['tipe_vegetasi']} | **Jarak Pemukiman:** {r['jarak_pemukiman_km']} km")
-                        st.markdown(f"**Status Saat Ini:** <span style='color: #f59e0b; font-weight: bold;'>{r['status_penanganan']}</span>", unsafe_allow_html=True)
-                        
-                        link_gmaps = r['link_lokasi']
-                        st.markdown(f"📍 **Navigasi Armada:** [Buka Rute di Google Maps]({link_gmaps})")
+                    catatan_selesai = st.text_input(
+                        "Catatan Penanganan Lapangan:",
+                        value=r.get('catatan_tim', ''),
+                        placeholder="Misal: Api berhasil dipadamkan regu Posko Airmadidi...",
+                        key=f"note_active_{r['id']}"
+                    )
 
-                    with c_media:
-                        st.markdown("**Bukti Foto Kebakaran:**")
-                        gambar_src = r['gambar_kebakaran']
-                        if gambar_src:
-                            try:
-                                if os.path.exists(gambar_src):
-                                    img = Image.open(gambar_src)
-                                    st.image(img, caption=r['kode_laporan'], use_container_width=True)
-                                else:
-                                    st.image(gambar_src, caption=r['kode_laporan'], use_container_width=True)
-                            except Exception:
-                                st.caption("Foto bukti tidak dapat ditampilkan.")
-                        else:
-                            st.caption("Tidak ada foto lampiran.")
+                    # TOMBOL UTAMA: TANDAI SUDAH DIATASI
+                    if st.button(f"✅ Tandai Sudah Diatasi ({r['kode_laporan']})", key=f"btn_done_{r['id']}", use_container_width=True):
+                        catatan_final = catatan_selesai.strip() if catatan_selesai.strip() else "Kebakaran telah berhasil dipadamkan oleh regu lapangan."
+                        tandai_sudah_diatasi(r['id'], catatan_final)
+                        st.success(f"Laporan {r['kode_laporan']} telah berhasil dipadamkan dan dipindahkan ke Riwayat!")
+                        st.rerun()
 
-                    with c_action:
-                        st.markdown("**Tindakan Petugas Pemadam:**")
-                        
-                        # Input catatan penyelesaian
-                        catatan_selesai = st.text_input(
-                            "Catatan Hasil Pemadaman / Tindakan Tim:",
-                            value=r.get('catatan_tim', ''),
-                            placeholder="Misal: Api berhasil dipadamkan regu Damkar Airmadidi...",
-                            key=f"note_active_{r['id']}"
+                    # Opsi Pembaruan Status Bertahap
+                    with st.expander("Ubah Status Operasional", expanded=False):
+                        status_options = ["Menunggu Penanganan", "Tim Menuju Lokasi", "Sedang Dipadamkan"]
+                        cur_idx = status_options.index(r['status_penanganan']) if r['status_penanganan'] in status_options else 0
+                        new_st = st.selectbox(
+                            "Status Tim:",
+                            status_options,
+                            index=cur_idx,
+                            key=f"sel_st_{r['id']}"
                         )
-
-                        # TOMBOL UTAMA: TANDAI SUDAH DIATASI
-                        if st.button(f"Tandai Sudah Diatasi ({r['kode_laporan']})", key=f"btn_done_{r['id']}", use_container_width=True):
-                            catatan_final = catatan_selesai.strip() if catatan_selesai.strip() else "Kebakaran telah berhasil dipadamkan oleh regu lapangan."
-                            tandai_sudah_diatasi(r['id'], catatan_final)
-                            st.success(f"Laporan {r['kode_laporan']} telah ditandai SUDAH DIATASI dan dipindahkan ke Riwayat!")
+                        if st.button(f"Perbarui ke '{new_st}'", key=f"btn_update_{r['id']}", use_container_width=True):
+                            update_status_pemadaman(r['id'], new_st, catatan_selesai)
+                            st.success("Status operasional berhasil diperbarui!")
                             st.rerun()
 
-                        # Update Status Bertahap Lainnya (Opsional)
-                        with st.expander("Ubah Status Operasional Lainnya", expanded=False):
-                            status_options = ["Menunggu Penanganan", "Tim Menuju Lokasi", "Sedang Dipadamkan"]
-                            cur_idx = status_options.index(r['status_penanganan']) if r['status_penanganan'] in status_options else 0
-                            new_st = st.selectbox(
-                                "Status Operasional:",
-                                status_options,
-                                index=cur_idx,
-                                key=f"sel_st_{r['id']}"
-                            )
-                            if st.button(f"Perbarui Status Jadi '{new_st}'", key=f"btn_update_{r['id']}"):
-                                update_status_pemadaman(r['id'], new_st, catatan_selesai)
-                                st.success("Status operasional diperbarui!")
-                                st.rerun()
-
-                    st.markdown("<hr style='border: none; border-top: 1px dashed #334155; margin: 15px 0 20px 0;'>", unsafe_allow_html=True)
+                st.markdown("<hr style='border: none; border-top: 1px solid #e2e8f0; margin: 18px 0 24px 0;'>", unsafe_allow_html=True)
 
     # ==================== TAB 2: RIWAYAT PENANGANAN (SUDAH DIATASI) ====================
     with tab_histori:
-        st.markdown("#### Riwayat Arsip Kebakaran yang Telah Berhasil Diatasi")
-        st.caption("Daftar seluruh insiden kebakaran di kawasan Gunung Klabat yang telah selesai dipadamkan dan ditangani oleh regu pemadam.")
+        st.markdown("#### Arsip Riwayat Kebakaran yang Telah Selesai Ditangani")
+        st.caption("Daftar insiden kebakaran di kawasan Gunung Klabat yang berhasil dipadamkan dengan waktu penyelesaian terekam.")
 
         if df_riwayat.empty:
-            st.info("Belum ada riwayat penanganan selesai. Laporan yang ditandai 'Sudah Diatasi' pada Tab 1 akan otomatis masuk ke sini.")
+            st.info("Belum ada riwayat penanganan selesai. Laporan yang ditandai 'Sudah Diatasi' pada Tab 1 akan otomatis tercatat di sini.")
         else:
             for idx, r in df_riwayat.iterrows():
-                with st.container():
-                    st.markdown(f"""
-                    <div style="background-color: #0f172a; border-left: 6px solid #10b981; border-radius: 8px; padding: 18px; margin-bottom: 16px; border: 1px solid #334155;">
-                        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
-                            <div>
-                                <span style="font-size: 17px; font-weight: bold; color: #ffffff;">
-                                    {r['kode_laporan']} - {r['lokasi_area']}
-                                </span>
-                                <span style="font-size: 12px; color: #10b981; margin-left: 12px; font-weight: bold;">
-                                    SELESAI / PADAM
-                                </span>
-                            </div>
-                            <div>
-                                <span style="background-color: #10b981; color: #ffffff; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: bold;">
-                                    SUDAH DIATASI
-                                </span>
-                            </div>
+                st.markdown(f"""
+                <div style="background-color: #ffffff; border: 1px solid #bbf7d0; border-left: 5px solid #10b981; border-radius: 12px; padding: 16px 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                        <div>
+                            <span style="font-size: 16px; font-weight: 800; color: #0f172a;">
+                                {r['kode_laporan']} • {r['lokasi_area']}
+                            </span>
+                            <span style="font-size: 12px; color: #059669; margin-left: 10px; font-weight: 700;">
+                                ✅ STATUS: PADAM / BERHASIL DIATASI
+                            </span>
                         </div>
+                        <div>
+                            <span style="background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 700;">
+                                KASUS SELESAI
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                c_h_info, c_h_media, c_h_time = st.columns([1.5, 1.0, 1.2])
+
+                with c_h_info:
+                    st.markdown(f"**Nama Pelapor:** {r['nama_user']} | Kontak: `{r.get('kontak_user') or 'Tanpa kontak'}`")
+                    st.markdown(f"**Vegetasi:** {r['tipe_vegetasi']} | **Jarak Pemukiman:** {r['jarak_pemukiman_km']} km")
+                    st.markdown(f"**Deskripsi Awal:** *\"{r['deskripsi_tempat']}\"*")
+                    st.markdown(f"**Catatan Petugas:** <span style='color: #059669; font-weight: 600;'>\"{r.get('catatan_tim') or 'Penanganan selesai dan kondisi lereng aman.'}\"</span>", unsafe_allow_html=True)
+
+                with c_h_media:
+                    gambar_src = r['gambar_kebakaran']
+                    if gambar_src:
+                        try:
+                            if os.path.exists(gambar_src):
+                                img = Image.open(gambar_src)
+                                st.image(img, caption=f"Dokumentasi {r['kode_laporan']}", use_container_width=True)
+                            else:
+                                st.image(gambar_src, caption=f"Dokumentasi {r['kode_laporan']}", use_container_width=True)
+                        except Exception:
+                            st.caption("Foto dokumentasi.")
+                    else:
+                        st.caption("Tanpa foto.")
+
+                with c_h_time:
+                    st.markdown(f"""
+                    <div style="background-color: #f8fafc; border: 1px solid #e2e8f0; padding: 12px 14px; border-radius: 8px; font-size: 12px; color: #334155;">
+                        <div style="margin-bottom: 6px;"><b>Waktu Lapor Masuk:</b><br>{r['tanggal_lapor']}</div>
+                        <div style="margin-bottom: 6px;"><b>Waktu Selesai Pemadaman:</b><br><span style="color: #059669; font-weight: 700;">{r.get('waktu_selesai') or 'Telah diselesaikan'}</span></div>
+                        <div><b>Skor Prioritas Awal:</b> {r['skor_prioritas']} ({r['label_prioritas']})</div>
                     </div>
                     """, unsafe_allow_html=True)
 
-                    c_h_info, c_h_media, c_h_time = st.columns([1.5, 1, 1.2])
+                    if st.button(f"🔄 Buka Kembali Kasus", key=f"btn_reopen_{r['id']}", use_container_width=True):
+                        update_status_pemadaman(r['id'], "Sedang Dipadamkan", "Kasus dibuka kembali karena titik api menyala kembali.")
+                        st.warning(f"Kasus {r['kode_laporan']} telah dikembalikan ke Antrean Aktif.")
+                        st.rerun()
 
-                    with c_h_info:
-                        st.markdown(f"**Nama Pelapor:** {r['nama_user']} | Kontak: `{r.get('kontak_user') or 'Tanpa kontak'}`")
-                        st.markdown(f"**Deskripsi Kejadian:** *\"{r['deskripsi_tempat']}\"*")
-                        st.markdown(f"**Vegetasi:** {r['tipe_vegetasi']} | Jarak Pemukiman: {r['jarak_pemukiman_km']} km")
-                        st.markdown(f"**Catatan Petugas Pemadam:** <span style='color: #10b981; font-weight: bold;'>\"{r.get('catatan_tim') or 'Penanganan selesai dan kondisi aman.'}\"</span>", unsafe_allow_html=True)
-                        
-                        link_gmaps = r['link_lokasi']
-                        st.markdown(f"📍 [Lihat Koordinat di Google Maps]({link_gmaps})")
-
-                    with c_h_media:
-                        gambar_src = r['gambar_kebakaran']
-                        if gambar_src:
-                            try:
-                                if os.path.exists(gambar_src):
-                                    img = Image.open(gambar_src)
-                                    st.image(img, caption=f"Dokumentasi {r['kode_laporan']}", use_container_width=True)
-                                else:
-                                    st.image(gambar_src, caption=f"Dokumentasi {r['kode_laporan']}", use_container_width=True)
-                            except Exception:
-                                st.caption("Foto dokumentasi.")
-                        else:
-                            st.caption("Tanpa foto.")
-
-                    with c_h_time:
-                        st.markdown(f"""
-                        <div style="background-color: #1e293b; padding: 12px; border-radius: 6px; font-size: 12px; border: 1px solid #334155;">
-                            <b>Waktu Lapor Masuk:</b><br>{r['tanggal_lapor']}<br><br>
-                            <b>Waktu Berhasil Diatasi:</b><br><span style="color: #10b981; font-weight: bold;">{r.get('waktu_selesai') or 'Telah diselesaikan'}</span><br><br>
-                            <b>Skor Prioritas Awal:</b> {r['skor_prioritas']} ({r['label_prioritas']})
-                        </div>
-                        """, unsafe_allow_html=True)
-
-                        # Opsi buka kembali jika api muncul lagi
-                        if st.button(f"Buka Kembali Kasus (Rekurensi Api)", key=f"btn_reopen_{r['id']}"):
-                            update_status_pemadaman(r['id'], "Sedang Dipadamkan", "Kasus dibuka kembali karena titik api menyala kembali.")
-                            st.warning(f"Kasus {r['kode_laporan']} telah dibuka kembali ke Antrean Aktif.")
-                            st.rerun()
-
-                    st.markdown("<hr style='border: none; border-top: 1px dashed #334155; margin: 15px 0 20px 0;'>", unsafe_allow_html=True)
+                st.markdown("<hr style='border: none; border-top: 1px solid #e2e8f0; margin: 18px 0 24px 0;'>", unsafe_allow_html=True)
 
     # ==================== TAB 3: PETA GEOSPASIAL GUNUNG KLABAT ====================
     with tab_peta:
-        st.markdown("#### Peta Titik Sebaran Kebakaran Gunung Klabat")
-        st.caption("Pusat pantauan: Puncak Gunung Klabat (1.995 mdpl) dan seluruh jalur lereng Minahasa Utara.")
+        st.markdown("#### Peta Interaktif Sebaran Titik Api Gunung Klabat")
+        st.caption("Pusat pantauan: Puncak Gunung Klabat (1.995 mdpl) serta koridor lereng desa Airmadidi, Kalawat, Dimembe, dan Kauditan.")
 
         klabat_map = render_klabat_folium_map(df_all)
         st_folium(klabat_map, width="100%", height=560, returned_objects=[])
 
         st.markdown("""
-        <div style="background-color: #1e293b; padding: 12px 16px; border-radius: 8px; font-size: 12px; margin-top: 12px; border: 1px solid #334155;">
-            <b>Legenda Status Titik di Peta:</b><br>
-            <span style="color: #ef4444; font-weight: bold;">● Merah:</span> Prioritas Kritis Aktif (Dekat pemukiman Airmadidi / Kaki Dian / Suwaan)<br>
-            <span style="color: #f97316; font-weight: bold;">● Oranye:</span> Prioritas Tinggi Aktif (Jalur pendakian aktif Pos 1-6 atau kebun cengkeh warga)<br>
-            <span style="color: #f59e0b; font-weight: bold;">● Kuning:</span> Prioritas Sedang Aktif (Savana puncak atau kawasan lereng terisolasi)<br>
-            <span style="color: #10b981; font-weight: bold;">● Hijau Zamrud:</span> <b>Sudah Berhasil Diatasi / Api Padam</b>
+        <div style="background-color: #ffffff; border: 1px solid #e2e8f0; padding: 14px 18px; border-radius: 10px; font-size: 12.5px; margin-top: 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.03);">
+            <div style="font-weight: 700; color: #0f172a; margin-bottom: 8px;">Legenda Status Marker Peta Geospasial:</div>
+            <div style="display: flex; gap: 18px; flex-wrap: wrap; color: #334155;">
+                <div><span style="color: #ef4444; font-weight: 800;">● Merah:</span> Prioritas Kritis Aktif (Dekat Pemukiman / Kaki Dian)</div>
+                <div><span style="color: #f97316; font-weight: 800;">● Oranye:</span> Prioritas Tinggi Aktif (Jalur Pendakian Pos 1-6)</div>
+                <div><span style="color: #f59e0b; font-weight: 800;">● Kuning:</span> Prioritas Sedang Aktif (Lereng Terisolasi / Savana)</div>
+                <div><span style="color: #10b981; font-weight: 800;">● Hijau:</span> Sudah Berhasil Diatasi / Api Padam</div>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
-    # ==================== TAB 4: FISHBONE (KHUSUS PETUGAS) ====================
+    # ==================== TAB 4: FISHBONE RCA ====================
     with tab_fishbone:
-        render_tab_fishbone(df_all) 
+        render_tab_fishbone(df_all)

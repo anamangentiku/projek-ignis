@@ -79,19 +79,20 @@ def render_klabat_folium_map(df: pd.DataFrame, selected_id: Optional[int] = None
 
         is_resolved = (status in ["Sudah Diatasi", "Selesai / Padam"])
         marker_color = "#10B981" if is_resolved else color
-        badge_header = f"SUDAH DIATASI" if is_resolved else f"Prioritas {label_prio} ({skor:.1f})"
+        badge_header = "SUDAH DIATASI" if is_resolved else f"Prioritas {label_prio} (Skor: {skor:.1f})"
 
         popup_html = f"""
-        <div style="font-family: Arial, sans-serif; font-size: 12px; width: 230px; line-height: 1.4;">
-            <div style="background-color: {marker_color}; color: #fff; padding: 4px 8px; font-weight: bold; border-radius: 3px;">
-                {kode} - {badge_header}
+        <div style="font-family: 'Plus Jakarta Sans', system-ui, sans-serif; font-size: 12px; width: 240px; color: #1e293b; line-height: 1.5; padding: 2px;">
+            <div style="background: {marker_color}; color: #ffffff; padding: 6px 10px; font-weight: 700; font-size: 12px; border-radius: 6px; letter-spacing: 0.3px; margin-bottom: 8px;">
+                {kode} • {badge_header}
             </div>
-            <div style="padding: 6px 2px;">
-                <b>Lokasi:</b> {area}<br>
-                <b>Pelapor:</b> {pelapor}<br>
-                <b>Status:</b> <span style="font-weight: bold; color: {'#10B981' if is_resolved else '#F59E0B'};">{status}</span><br>
-                <hr style="margin: 6px 0; border: none; border-top: 1px solid #ddd;">
-                <a href="{gmaps}" target="_blank" style="color: #0077B6; font-weight: bold;">Buka Google Maps</a>
+            <div style="padding: 0 4px 6px 4px;">
+                <div style="font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 4px;">{area}</div>
+                <div style="color: #475569; font-size: 11px; margin-bottom: 3px;"><b>Pelapor:</b> {pelapor}</div>
+                <div style="color: #475569; font-size: 11px; margin-bottom: 6px;"><b>Status:</b> <span style="font-weight: 700; color: {'#059669' if is_resolved else '#d97706'};">{status}</span></div>
+                <div style="border-top: 1px solid #e2e8f0; padding-top: 6px; text-align: center;">
+                    <a href="{gmaps}" target="_blank" style="display: inline-block; background: #0284c7; color: #ffffff; padding: 4px 12px; border-radius: 4px; font-size: 11px; font-weight: 600; text-decoration: none;">📍 Buka Navigasi Rute</a>
+                </div>
             </div>
         </div>
         """

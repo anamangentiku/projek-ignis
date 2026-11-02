@@ -224,18 +224,18 @@ def ringkas_faktor(faktor: List[Dict[str, Any]]) -> Dict[str, int]:
 # ----------------------------------------------------------------------------
 def render_fishbone_plotly(faktor: List[Dict[str, Any]], judul: str = "Fishbone Diagram Kebakaran Gunung Klabat") -> go.Figure:
     """Menggambar diagram tulang ikan. Hijau solid = didukung data; oranye titik-titik = dugaan."""
-    WARNA_DATA, WARNA_DUGAAN = "#2ECC71", "#F39C12"
-    WARNA_TULANG, WARNA_EFEK = "#48CAE4", "#E63946"
+    WARNA_DATA, WARNA_DUGAAN = "#059669", "#d97706"
+    WARNA_TULANG, WARNA_EFEK = "#0284c7", "#ea580c"
 
     fig = go.Figure()
 
     # Tulang belakang
     fig.add_trace(go.Scatter(x=[0, 11], y=[0, 0], mode="lines",
-                             line=dict(color=WARNA_EFEK, width=6),
+                             line=dict(color=WARNA_EFEK, width=5),
                              hoverinfo="none", showlegend=False))
     fig.add_annotation(x=11.15, y=0, xanchor="left", showarrow=False,
-                       text=f"<b>{EFEK}</b>", font=dict(size=12, color="#FFFFFF"),
-                       bgcolor=WARNA_EFEK, bordercolor="#FFFFFF", borderwidth=2, borderpad=6)
+                       text=f"<b>{EFEK}</b>", font=dict(size=12, color="#FFFFFF", family="Plus Jakarta Sans, sans-serif"),
+                       bgcolor=WARNA_EFEK, bordercolor=WARNA_EFEK, borderwidth=1, borderpad=6)
 
     # Posisi cabang
     cabang = []
@@ -251,12 +251,12 @@ def render_fishbone_plotly(faktor: List[Dict[str, Any]], judul: str = "Fishbone 
         xb, arah = c["x_base"], c["arah"]
         x_ujung, y_ujung = xb - GESER, arah * TINGGI
         fig.add_trace(go.Scatter(x=[xb, x_ujung], y=[0, y_ujung], mode="lines",
-                                 line=dict(color=WARNA_TULANG, width=3),
+                                 line=dict(color=WARNA_TULANG, width=2.5),
                                  hoverinfo="none", showlegend=False))
         fig.add_annotation(x=x_ujung, y=y_ujung + arah * 0.4, showarrow=False,
                            text=f"<b>{c['nama'].upper()}</b>",
-                           font=dict(size=12, color="#90E0EF"),
-                           bgcolor="#0B192C", bordercolor=WARNA_TULANG, borderwidth=1, borderpad=4)
+                           font=dict(size=11, color="#0f172a", family="Plus Jakarta Sans, sans-serif"),
+                           bgcolor="#f1f5f9", bordercolor="#cbd5e1", borderwidth=1, borderpad=4)
 
         sub = [f for f in faktor if f["kategori"] == c["nama"]]
         for idx, f in enumerate(sub):
@@ -284,16 +284,16 @@ def render_fishbone_plotly(faktor: List[Dict[str, Any]], judul: str = "Fishbone 
             label = "<br>".join(textwrap.wrap(f["singkat"], 24))
             fig.add_annotation(x=fx - 0.4, y=fy, xanchor="right", yanchor="middle",
                                showarrow=False, align="right", text=label,
-                               font=dict(size=10, color="#E0E1DD"))
+                               font=dict(size=10, color="#334155", family="Plus Jakarta Sans, sans-serif"))
 
     fig.update_layout(
-        title=dict(text=judul, font=dict(size=15, color="#FFFFFF")),
-        plot_bgcolor="#0A1128", paper_bgcolor="#070D1F",
+        title=dict(text=judul, font=dict(size=15, color="#0f172a", family="Plus Jakarta Sans, sans-serif")),
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
         xaxis=dict(visible=False, range=[-0.5, 13.8]),
         yaxis=dict(visible=False, range=[-4.6, 4.6]),
-        margin=dict(l=10, r=10, t=50, b=10), height=640,
-        legend=dict(orientation="h", yanchor="bottom", y=-0.02, xanchor="center", x=0.5,
-                    font=dict(color="#FFFFFF", size=11)))
+        margin=dict(l=15, r=15, t=55, b=15), height=560,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.03, xanchor="center", x=0.5,
+                    font=dict(color="#475569", size=11, family="Plus Jakarta Sans, sans-serif")))
     return fig
 
 
